@@ -9,6 +9,11 @@
   320kbps+/lossless files, tagged with MusicBrainz metadata and cover art.
 </p>
 
+<p align="center">
+  <em>&#x1F916; AI disclosure: this application was created with AI assistance
+  (Anthropic's Claude), from architecture through implementation and testing.</em>
+</p>
+
 ---
 
 ## What it does
@@ -120,11 +125,6 @@ SpiritSeeker is a tool for searching and downloading files shared by peers on
 the Soulseek network. Downloading copyrighted material you don't have the
 rights to may be illegal in your jurisdiction. Use it for music you're
 entitled to download. The authors take no responsibility for how you use it.
-
-## AI disclosure
-
-This application was created with AI assistance (Anthropic's Claude), from
-architecture through implementation and testing.
 
 ## License
 
