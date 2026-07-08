@@ -46,7 +46,7 @@ class App:
         # --- playlist input row ---
         top = ttk.Frame(self.root)
         top.pack(fill="x", **pad)
-        ttk.Label(top, text="Spotify playlist:").pack(side="left")
+        ttk.Label(top, text="Spotify link (playlist or song):").pack(side="left")
         self.url_var = tk.StringVar()
         url_entry = ttk.Entry(top, textvariable=self.url_var)
         url_entry.pack(side="left", fill="x", expand=True, padx=6)
@@ -117,7 +117,8 @@ class App:
         self.stop_btn.pack(side="left", padx=(6, 0))
         self.progress = ttk.Progressbar(actions, mode="determinate")
         self.progress.pack(side="left", fill="x", expand=True, padx=10)
-        self.summary_var = tk.StringVar(value="Load a playlist to begin")
+        self.summary_var = tk.StringVar(
+            value="Paste a playlist or song link to begin")
         ttk.Label(actions, textvariable=self.summary_var).pack(side="right")
 
         # --- log pane ---

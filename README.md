@@ -13,7 +13,8 @@
 
 ## What it does
 
-1. **Fetches your playlist** straight from Spotify's public pages — no Spotify
+1. **Fetches your playlist — or a single song** — straight from Spotify's
+   public pages. Paste either a playlist link or a track link; no Spotify
    account, no API keys, nothing to register.
 2. **Searches Soulseek** for every track. A Soulseek account is created
    automatically on first run (the network registers accounts on first login).
@@ -30,6 +31,11 @@
    Falls back to the Spotify metadata when MusicBrainz has no match.
 6. **Saves everything flat** as `Artist - Title.ext` in your chosen folder,
    skipping tracks you already have.
+
+Tracks that can't be found on Soulseek (or whose peers are too slow) are
+given up on after 8 minutes and marked failed, so a rare song never stalls
+the rest of the playlist. The timeout is configurable via `track_timeout_min`
+in the config file.
 
 ## Quality rules
 
@@ -106,6 +112,11 @@ SpiritSeeker is a tool for searching and downloading files shared by peers on
 the Soulseek network. Downloading copyrighted material you don't have the
 rights to may be illegal in your jurisdiction. Use it for music you're
 entitled to download. The authors take no responsibility for how you use it.
+
+## AI disclosure
+
+This application was created with AI assistance (Anthropic's Claude), from
+architecture through implementation and testing.
 
 ## License
 

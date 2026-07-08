@@ -128,14 +128,23 @@ class Worker:
             self.notify("fatal", str(exc))
             return
 
+        track_timeout = max(1, int(self.config["track_timeout_min"])) * 60
+
         ok = fail = 0
         try:
             for index, track in enumerate(self.playlist.tracks):
                 try:
-                    done = await self._process_track(session, index, track,
-                                                     output_dir, tmp_dir)
+                    done = await asyncio.wait_for(
+                        self._process_track(session, index, track,
+                                            output_dir, tmp_dir),
+                        timeout=track_timeout)
                 except asyncio.CancelledError:
                     raise
+                except TimeoutError:
+                    self.notify("track", index, Status.FAILED,
+                                f"gave up after {track_timeout // 60} min "
+                                "(not found or peers too slow)")
+                    done = False
                 except (SoulseekError, verify.VerificationError, OSError) as exc:
                     self.notify("track", index, Status.FAILED, str(exc)[:120])
                     done = False

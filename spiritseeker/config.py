@@ -34,6 +34,8 @@ DEFAULTS = {
     "allow_lower_quality": False,
     "spectral_check": True,
     "listening_port": 61000,
+    # Give up on a track (search + all download attempts) after this long
+    "track_timeout_min": 8,
 }
 
 

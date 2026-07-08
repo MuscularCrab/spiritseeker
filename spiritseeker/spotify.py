@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 
 import requests
 
-EMBED_URL = "https://open.spotify.com/embed/playlist/{playlist_id}"
+EMBED_URL = "https://open.spotify.com/embed/{kind}/{item_id}"
 EMBED_TRACK_LIMIT = 100
 
 _BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -47,48 +47,67 @@ class Playlist:
     maybe_truncated: bool = False
 
 
-def parse_playlist_id(url_or_id: str) -> str:
-    """Accepts a full playlist URL, a spotify: URI, or a bare playlist id."""
+def parse_spotify_url(url_or_id: str) -> tuple[str, str]:
+    """Accepts a playlist/track URL, a spotify: URI, or a bare playlist id.
+
+    Returns ("playlist" | "track", id).
+    """
     text = url_or_id.strip()
-    m = re.search(r"playlist[/:]([A-Za-z0-9]{16,})", text)
+    m = re.search(r"(playlist|track)[/:]([A-Za-z0-9]{16,})", text)
     if m:
-        return m.group(1)
+        return m.group(1), m.group(2)
     if re.fullmatch(r"[A-Za-z0-9]{16,}", text):
-        return text
+        return "playlist", text
     raise SpotifyError(
-        "That doesn't look like a Spotify playlist link.\n"
-        "Expected something like https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M"
+        "That doesn't look like a Spotify playlist or song link.\n"
+        "Expected something like\n"
+        "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M or\n"
+        "https://open.spotify.com/track/2AMysGXOe0zzZJMtH3Nizb"
     )
 
 
-def fetch_playlist(url_or_id: str, timeout: int = 20) -> Playlist:
-    playlist_id = parse_playlist_id(url_or_id)
-    url = EMBED_URL.format(playlist_id=playlist_id)
+def _fetch_embed_entity(kind: str, item_id: str, timeout: int) -> dict:
+    url = EMBED_URL.format(kind=kind, item_id=item_id)
     try:
         resp = requests.get(url, headers={"User-Agent": _BROWSER_UA}, timeout=timeout)
     except requests.RequestException as exc:
         raise SpotifyError(f"Could not reach Spotify: {exc}") from exc
     if resp.status_code != 200:
         raise SpotifyError(
-            f"Spotify returned HTTP {resp.status_code} - is the playlist public?")
+            f"Spotify returned HTTP {resp.status_code} - is the {kind} public?")
 
     m = re.search(
         r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>',
         resp.text, re.DOTALL)
     if not m:
         raise SpotifyError(
-            "Could not find playlist data in the Spotify page. Spotify may have "
+            f"Could not find {kind} data in the Spotify page. Spotify may have "
             "changed their site - try the CSV import instead.")
-
     try:
         data = json.loads(m.group(1))
-        entity = data["props"]["pageProps"]["state"]["data"]["entity"]
-        name = entity.get("name") or "Spotify Playlist"
-        track_list = entity.get("trackList") or []
+        return data["props"]["pageProps"]["state"]["data"]["entity"]
     except (ValueError, KeyError, TypeError) as exc:
         raise SpotifyError(
             f"Spotify page layout changed ({exc}). Try the CSV import instead.") from exc
 
+
+def fetch_playlist(url_or_id: str, timeout: int = 20) -> Playlist:
+    """Fetch a playlist OR a single track, depending on the link pasted."""
+    kind, item_id = parse_spotify_url(url_or_id)
+    entity = _fetch_embed_entity(kind, item_id, timeout)
+
+    if kind == "track":
+        title = (entity.get("title") or entity.get("name") or "").strip()
+        artist = ", ".join(
+            a.get("name", "") for a in entity.get("artists") or []).strip()
+        if not title:
+            raise SpotifyError("Could not read the song's details from Spotify.")
+        track = Track(title=title, artist=artist,
+                      duration_ms=int(entity.get("duration") or 0))
+        return Playlist(name=str(track), tracks=[track])
+
+    name = entity.get("name") or "Spotify Playlist"
+    track_list = entity.get("trackList") or []
     if not track_list:
         raise SpotifyError("The playlist appears to be empty or private.")
 
