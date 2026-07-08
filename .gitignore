@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# PyInstaller
+build/
+dist/
+*.spec
+
+# App/test artifacts
+*.log
+.spiritseeker-tmp/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Local tooling
+.claude/

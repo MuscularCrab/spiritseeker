@@ -1,0 +1,73 @@
+"""Persistent app configuration stored in %APPDATA%/SpiritSeeker/config.json.
+
+Holds the auto-generated Soulseek credentials (the Soulseek network creates an
+account on first login, no registration or API key needed) and UI preferences.
+"""
+import json
+import os
+import random
+import string
+from pathlib import Path
+
+
+def config_dir() -> Path:
+    base = os.environ.get("APPDATA") or str(Path.home())
+    d = Path(base) / "SpiritSeeker"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _config_path() -> Path:
+    return config_dir() / "config.json"
+
+
+def _generate_credentials() -> dict:
+    suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=8))
+    password = "".join(random.choices(string.ascii_letters + string.digits, k=16))
+    return {"username": f"spiritseeker_{suffix}", "password": password}
+
+
+DEFAULTS = {
+    "soulseek_username": "",
+    "soulseek_password": "",
+    "output_dir": str(Path.home() / "Music" / "SpiritSeeker"),
+    "allow_lower_quality": False,
+    "spectral_check": True,
+    "listening_port": 61000,
+}
+
+
+class Config:
+    def __init__(self):
+        self.data = dict(DEFAULTS)
+        self.load()
+        if not self.data["soulseek_username"]:
+            creds = _generate_credentials()
+            self.data["soulseek_username"] = creds["username"]
+            self.data["soulseek_password"] = creds["password"]
+            self.save()
+
+    def load(self):
+        try:
+            with open(_config_path(), "r", encoding="utf-8") as f:
+                stored = json.load(f)
+            self.data.update({k: v for k, v in stored.items() if k in DEFAULTS})
+        except (OSError, ValueError):
+            pass
+
+    def save(self):
+        with open(_config_path(), "w", encoding="utf-8") as f:
+            json.dump(self.data, f, indent=2)
+
+    def regenerate_credentials(self):
+        """New random Soulseek identity (e.g. if the username is taken)."""
+        creds = _generate_credentials()
+        self.data["soulseek_username"] = creds["username"]
+        self.data["soulseek_password"] = creds["password"]
+        self.save()
+
+    def __getitem__(self, key):
+        return self.data[key]
+
+    def __setitem__(self, key, value):
+        self.data[key] = value

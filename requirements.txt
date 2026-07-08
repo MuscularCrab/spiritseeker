@@ -1,0 +1,5 @@
+aioslsk>=1.6,<2
+mutagen>=1.47
+numpy>=1.26
+requests>=2.31
+imageio-ffmpeg>=0.5
