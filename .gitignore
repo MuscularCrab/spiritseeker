@@ -7,7 +7,6 @@ venv/
 # PyInstaller
 build/
 dist/
-*.spec
 
 # App/test artifacts
 *.log

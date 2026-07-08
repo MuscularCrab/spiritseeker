@@ -12,13 +12,7 @@ echo === Installing dependencies ===
 %PYTHON% -m pip install -r requirements.txt pyinstaller || goto :error
 
 echo === Building SpiritSeeker.exe ===
-%PYTHON% -m PyInstaller --noconfirm --clean ^
-    --onefile --windowed ^
-    --name SpiritSeeker ^
-    --icon assets\icon.ico ^
-    --add-data "assets;assets" ^
-    --collect-all imageio_ffmpeg ^
-    run.py || goto :error
+%PYTHON% -m PyInstaller --noconfirm --clean SpiritSeeker.spec || goto :error
 
 echo.
 echo Build complete: dist\SpiritSeeker.exe
