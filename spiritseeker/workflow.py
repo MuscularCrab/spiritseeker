@@ -66,6 +66,7 @@ class Worker:
 
     ``notify`` is called from the worker thread with:
         ("track", index, Status, detail_str)
+        ("track_path", index, local_file_path)
         ("progress", index, done_bytes, total_bytes)
         ("log", message)
         ("finished", ok_count, fail_count)
@@ -113,13 +114,19 @@ class Worker:
         tmp_dir = os.path.join(output_dir, ".spiritseeker-tmp")
         os.makedirs(tmp_dir, exist_ok=True)
 
-        self.notify("log", "Connecting to Soulseek "
-                    f"as {self.config['soulseek_username']}...")
+        username, password, is_custom = self.config.effective_credentials()
+        shared = [p for p in self.config["shared_folders"] if os.path.isdir(p)]
+        self.notify("log", f"Connecting to Soulseek as {username}"
+                    + (" (your account)" if is_custom else "") + "...")
+        if shared:
+            self.notify("log", f"Sharing {len(shared)} folder(s) with the "
+                        "network while downloading.")
         session = SoulseekSession(
-            username=self.config["soulseek_username"],
-            password=self.config["soulseek_password"],
+            username=username,
+            password=password,
             download_dir=tmp_dir,
             listening_port=int(self.config["listening_port"]),
+            shared_folders=shared,
             log=lambda msg: self.notify("log", msg),
         )
         try:
@@ -162,6 +169,7 @@ class Worker:
                              track: Track, output_dir: str, tmp_dir: str) -> bool:
         existing = already_downloaded(track, output_dir)
         if existing:
+            self.notify("track_path", index, existing)
             self.notify("track", index, Status.SKIPPED, "already in folder")
             return True
 
@@ -192,7 +200,14 @@ class Worker:
         local_path = None
         report = None
         rejected_note = ""
-        for attempt, cand in enumerate(ranked[:MAX_CANDIDATE_ATTEMPTS], 1):
+        stuck_users: set[str] = set()
+        attempt = 0
+        for cand in ranked:
+            if attempt >= MAX_CANDIDATE_ATTEMPTS:
+                break
+            if cand.username in stuck_users:
+                continue    # their queue already timed out on us once
+            attempt += 1
             self.notify("track", index, Status.DOWNLOADING,
                         f"[{attempt}/{min(len(ranked), MAX_CANDIDATE_ATTEMPTS)}] "
                         f"{cand.describe()}")
@@ -202,6 +217,8 @@ class Worker:
                     progress=lambda done, total: self.notify(
                         "progress", index, done, total))
             except SoulseekError as exc:
+                if "queue" in str(exc).lower():
+                    stuck_users.add(cand.username)
                 self.notify("log", f"{track}: {cand.username} failed ({exc})")
                 continue
 
@@ -247,6 +264,7 @@ class Worker:
         dest = final_path_for(track, ext, output_dir)
         shutil.move(local_path, dest)
 
+        self.notify("track_path", index, dest)
         self.notify("track", index, Status.DONE,
                     f"{report.summary()} | {tag_note}")
         return True

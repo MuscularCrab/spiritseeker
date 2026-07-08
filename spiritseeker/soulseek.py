@@ -14,7 +14,8 @@ from typing import Callable, Optional
 from aioslsk.client import SoulSeekClient
 from aioslsk.exceptions import AioSlskException, AuthenticationError
 from aioslsk.protocol.primitives import AttributeKey
-from aioslsk.settings import CredentialsSettings, Settings
+from aioslsk.settings import (CredentialsSettings, Settings,
+                              SharedDirectorySettingEntry)
 from aioslsk.transfer.state import TransferState
 
 from .spotify import Track
@@ -99,7 +100,8 @@ def rank_candidates(track: Track, candidates: list[Candidate],
     """Filter to plausible matches and sort best-first."""
     title_tokens = _tokenize(_strip_extras(track.title))
     artist_tokens = _tokenize(re.split(r"[,;]", track.artist)[0])
-    wanted_tokens = _tokenize(track.title) | artist_tokens
+    all_artist_tokens = _tokenize(track.artist)
+    wanted_tokens = _tokenize(track.title) | all_artist_tokens
 
     ranked = []
     for c in candidates:
@@ -109,6 +111,11 @@ def rank_candidates(track: Track, candidates: list[Candidate],
 
         # Every significant word of the title must appear somewhere in the path
         if title_tokens and not title_tokens.issubset(path_tokens):
+            continue
+
+        # ...and so must at least one credited artist (folder or filename).
+        # Without this, a title-only hit can be a different song entirely.
+        if all_artist_tokens and not (all_artist_tokens & path_tokens):
             continue
 
         base = c.basename.lower()
@@ -152,6 +159,7 @@ class SoulseekSession:
 
     def __init__(self, username: str, password: str, download_dir: str,
                  listening_port: int = 61000,
+                 shared_folders: Optional[list[str]] = None,
                  log: Optional[Callable[[str], None]] = None):
         os.makedirs(download_dir, exist_ok=True)
         self._log = log or (lambda msg: None)
@@ -159,7 +167,10 @@ class SoulseekSession:
             credentials=CredentialsSettings(username=username, password=password),
         )
         settings.shares.download = download_dir
-        settings.shares.scan_on_start = False
+        shares = [SharedDirectorySettingEntry(path=p)
+                  for p in (shared_folders or []) if os.path.isdir(p)]
+        settings.shares.directories = shares
+        settings.shares.scan_on_start = bool(shares)
         settings.network.listening.port = listening_port
         settings.network.listening.obfuscated_port = listening_port + 1
         settings.network.server.reconnect.auto = True
@@ -210,7 +221,7 @@ class SoulseekSession:
 
     async def download(self, candidate: Candidate,
                        progress: Optional[Callable[[int, int], None]] = None,
-                       queue_timeout: float = 90.0,
+                       queue_timeout: float = 180.0,
                        stall_timeout: float = 60.0,
                        total_timeout: float = 900.0) -> str:
         """Download a search result. Returns the local file path.

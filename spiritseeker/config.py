@@ -30,12 +30,20 @@ def _generate_credentials() -> dict:
 DEFAULTS = {
     "soulseek_username": "",
     "soulseek_password": "",
+    # When enabled, log in with the user's own Soulseek account instead of
+    # the auto-generated identity
+    "use_custom_login": False,
+    "custom_username": "",
+    "custom_password": "",
+    # Folders shared (uploaded) to other Soulseek users while running
+    "shared_folders": [],
     "output_dir": str(Path.home() / "Music" / "SpiritSeeker"),
     "allow_lower_quality": False,
     "spectral_check": True,
     "listening_port": 61000,
     # Give up on a track (search + all download attempts) after this long
     "track_timeout_min": 8,
+    "dark_mode": False,
 }
 
 
@@ -67,6 +75,15 @@ class Config:
         self.data["soulseek_username"] = creds["username"]
         self.data["soulseek_password"] = creds["password"]
         self.save()
+
+    def effective_credentials(self) -> tuple[str, str, bool]:
+        """(username, password, is_custom) for the account actually used."""
+        if (self.data["use_custom_login"] and self.data["custom_username"]
+                and self.data["custom_password"]):
+            return (self.data["custom_username"],
+                    self.data["custom_password"], True)
+        return (self.data["soulseek_username"],
+                self.data["soulseek_password"], False)
 
     def __getitem__(self, key):
         return self.data[key]

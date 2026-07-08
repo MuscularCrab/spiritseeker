@@ -18,6 +18,9 @@
    account, no API keys, nothing to register.
 2. **Searches Soulseek** for every track. A Soulseek account is created
    automatically on first run (the network registers accounts on first login).
+   Prefer your own account? *Account & sharing...* lets you log in with your
+   existing Soulseek credentials and share folders back to the network for
+   uploads — some peers only serve users who share.
 3. **Downloads the best copy**: FLAC/lossless preferred, then MP3 320kbps.
    Sources are ranked by quality, matching filename, duration, free upload
    slots and peer speed. If one peer stalls, the next candidate is tried.
@@ -36,6 +39,11 @@ Tracks that can't be found on Soulseek (or whose peers are too slow) are
 given up on after 8 minutes and marked failed, so a rare song never stalls
 the rest of the playlist. The timeout is configurable via `track_timeout_min`
 in the config file.
+
+Right-click any track for the useful stuff: **Play**, **Open folder
+location**, **Copy file path**, **Copy "Artist - Title"**, and **Retry
+download** / **Download again**. Double-click plays the file. And yes,
+there's a dark mode toggle.
 
 ## Quality rules
 
