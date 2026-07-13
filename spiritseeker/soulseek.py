@@ -295,10 +295,13 @@ class SoulseekSession:
         return candidates
 
     async def download(self, candidate: Candidate,
-                       progress: Optional[Callable[[int, int], None]] = None,
+                       progress: Optional[Callable[[int, int, float], None]] = None,
                        queue_timeout: float = 180.0,
                        stall_timeout: float = 60.0) -> str:
         """Download a search result. Returns the local file path.
+
+        ``progress`` is called with (bytes_done, bytes_total,
+        rate_bytes_per_sec); the rate is smoothed over a ~5s window.
 
         A transfer that keeps receiving data is never timed out, no matter
         how slow - only queue waits and stalls are bounded.
@@ -312,6 +315,7 @@ class SoulseekSession:
         queued = 0.0
         last_bytes = -1
         poll = 0.5
+        samples: deque[tuple[float, int]] = deque()   # (monotonic, bytes)
         try:
             while True:
                 await asyncio.sleep(poll)
@@ -334,9 +338,19 @@ class SoulseekSession:
                     else:
                         stalled = 0.0
                         last_bytes = transfer.bytes_transfered
+                        now = time.monotonic()
+                        samples.append((now, last_bytes))
+                        while samples and now - samples[0][0] > 5.0:
+                            samples.popleft()
+                        rate = 0.0
+                        if len(samples) >= 2:
+                            dt = samples[-1][0] - samples[0][0]
+                            db = samples[-1][1] - samples[0][1]
+                            rate = db / dt if dt > 0 else 0.0
                         if progress:
                             progress(transfer.bytes_transfered,
-                                     transfer.filesize or candidate.filesize)
+                                     transfer.filesize or candidate.filesize,
+                                     rate)
                     if stalled >= stall_timeout:
                         raise SoulseekError("Transfer stalled")
                 else:

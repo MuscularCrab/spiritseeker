@@ -1,5 +1,5 @@
 """SpiritSeeker - Spotify playlist -> Soulseek downloader with quality verification."""
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 APP_NAME = "SpiritSeeker"
 USER_AGENT = f"{APP_NAME}/{__version__} (https://github.com/spiritseeker-app/spiritseeker)"

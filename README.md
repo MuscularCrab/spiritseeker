@@ -59,6 +59,27 @@ download** / **Download again**, and **Skip download** to leave songs out
 of a run. Double-click plays the file. Dark mode is on by default
 (toggle it in Settings).
 
+Tracks download **two at a time** by default (up to 4, see Settings), each
+with a live progress bar and transfer rate in the list, and failed tracks
+automatically get one more pass at the end of the run. When everything's
+done you get a Windows notification and a sound.
+
+## Chat, rooms, and browsing (the Nicotine+ essentials)
+
+The **Chat...** button opens a full Soulseek chat client sharing the same
+connection as your downloads:
+
+- **Private messages**: start conversations by username, receive messages
+  (unread count shows on the Chat button while the window is closed).
+- **Chat rooms**: browse the public room list, join/leave rooms, and chat.
+- **Browse users**: fetch any user's entire shared-file tree and
+  double-click files to download them straight to your save folder —
+  great for grabbing a whole album once one good track led you to a
+  well-stocked sharer.
+
+The connection stays up in the background, so chat keeps working while
+playlists download and vice versa.
+
 ## Quality rules
 
 - **Default (strict)**: only lossless files or MP3s at 320kbps that *pass*

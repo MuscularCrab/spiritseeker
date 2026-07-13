@@ -48,6 +48,12 @@ DEFAULTS = {
     "stall_timeout_sec": 60,
     # How many sources to try per track before giving up
     "max_attempts": 5,
+    # Tracks downloaded at the same time (searches stay globally paced)
+    "concurrent_downloads": 2,
+    # After the playlist finishes, make one more pass over failed tracks
+    "auto_retry_failed": True,
+    # Toast + sound when a run completes
+    "notify_on_finish": True,
     "dark_mode": True,
 }
 

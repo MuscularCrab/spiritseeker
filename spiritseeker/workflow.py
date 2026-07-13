@@ -9,16 +9,19 @@ import asyncio
 import os
 import re
 import shutil
-import threading
 import time
+from concurrent.futures import Future
 from enum import Enum
-from typing import Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 from . import tagger, verify
 from .config import Config
 from .soulseek import (Candidate, SoulseekError, SoulseekSession,
-                       build_queries, pick_listening_port, rank_candidates)
+                       build_queries, rank_candidates)
 from .spotify import Playlist, Track
+
+if TYPE_CHECKING:
+    from .connection import ConnectionManager
 
 # Consecutive tracks with zero raw search results before we assume the
 # server is rate-limiting us and cool down
@@ -77,12 +80,12 @@ def already_downloaded(track: Track, output_dir: str) -> Optional[str]:
 
 
 class Worker:
-    """Downloads a playlist on a dedicated thread.
+    """Downloads a playlist on the shared connection thread.
 
-    ``notify`` is called from the worker thread with:
+    ``notify`` is called from the connection thread with:
         ("track", index, Status, detail_str)
         ("track_path", index, local_file_path)
-        ("progress", index, done_bytes, total_bytes)
+        ("progress", index, done_bytes, total_bytes, rate_bytes_per_sec)
         ("log", message)
         ("finished", ok_count, fail_count)
         ("fatal", message)
@@ -90,40 +93,31 @@ class Worker:
 
     def __init__(self, playlist: Playlist, config: Config,
                  notify: Callable[..., None],
+                 manager: "ConnectionManager",
                  should_skip: Optional[Callable[[int], bool]] = None):
         self.playlist = playlist
         self.config = config
         self.notify = notify
+        self.manager = manager
         self.should_skip = should_skip
-        self._thread: Optional[threading.Thread] = None
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
-        self._main_task: Optional[asyncio.Task] = None
+        self._future: Optional[Future] = None
         self._empty_streak = 0
         self._cooldowns_used = 0
 
     def start(self):
-        self._thread = threading.Thread(target=self._thread_main, daemon=True)
-        self._thread.start()
+        self._future = self.manager.submit(self._runner())
 
     def cancel(self):
-        if self._loop and self._main_task:
-            self._loop.call_soon_threadsafe(self._main_task.cancel)
-
-    def _thread_main(self):
-        self._loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self._loop)
-        try:
-            self._loop.run_until_complete(self._runner())
-        finally:
-            self._loop.close()
+        if self._future:
+            self._future.cancel()
 
     async def _runner(self):
-        self._main_task = asyncio.current_task()
         try:
             await self._run()
         except asyncio.CancelledError:
             self.notify("log", "Cancelled.")
             self.notify("finished", -1, -1)
+            raise
         except Exception as exc:  # surface anything unexpected in the UI
             self.notify("fatal", f"{type(exc).__name__}: {exc}")
 
@@ -133,51 +127,49 @@ class Worker:
         tmp_dir = os.path.join(output_dir, ".spiritseeker-tmp")
         os.makedirs(tmp_dir, exist_ok=True)
 
-        username, password, is_custom = self.config.effective_credentials()
-        shared = [p for p in self.config["shared_folders"] if os.path.isdir(p)]
-        self.notify("log", f"Connecting to Soulseek as {username}"
-                    + (" (your account)" if is_custom else "") + "...")
-        if shared:
-            self.notify("log", f"Sharing {len(shared)} folder(s) with the "
-                        "network while downloading.")
-        preferred = int(self.config["listening_port"])
-        port, got_preferred = pick_listening_port(preferred)
-        if not got_preferred:
-            self.notify("log",
-                        f"Listening port {preferred} is in use (another "
-                        f"SpiritSeeker or Soulseek client?) - using {port} "
-                        "instead. If you rely on VPN port forwarding, close "
-                        "the other client so the forwarded port is free.")
-        session = SoulseekSession(
-            username=username,
-            password=password,
-            download_dir=tmp_dir,
-            listening_port=port,
-            shared_folders=shared,
-            log=lambda msg: self.notify("log", msg),
-        )
         try:
-            await session.start()
+            session = await self.manager.ensure_session()
         except SoulseekError as exc:
             self.notify("fatal", str(exc))
             return
+        # Incoming files for this run land in the tmp dir next to the output
+        session.client.settings.shares.download = tmp_dir
 
         track_timeout = max(1, int(self.config["track_timeout_min"])) * 60
+        concurrency = max(1, min(4, int(self.config["concurrent_downloads"])))
+        sem = asyncio.Semaphore(concurrency)
 
-        ok = fail = 0
-        try:
-            for index, track in enumerate(self.playlist.tracks):
+        async def attempt(index: int, track: Track) -> Optional[bool]:
+            """True/False = ok/failed; None = skipped by the user."""
+            if self.should_skip and self.should_skip(index):
+                self.notify("track", index, Status.SKIPPED, "skipped by you")
+                return None
+            async with sem:
                 if self.should_skip and self.should_skip(index):
-                    self.notify("track", index, Status.SKIPPED, "skipped by you")
-                    continue
-                done = await self._run_one(session, index, track,
+                    self.notify("track", index, Status.SKIPPED,
+                                "skipped by you")
+                    return None
+                return await self._run_one(session, index, track,
                                            output_dir, tmp_dir, track_timeout)
-                if done:
-                    ok += 1
-                else:
-                    fail += 1
+
+        try:
+            results = await asyncio.gather(
+                *(attempt(i, t) for i, t in enumerate(self.playlist.tracks)))
+            ok = sum(1 for r in results if r is True)
+            failed_idx = [i for i, r in enumerate(results) if r is False]
+
+            if failed_idx and self.config["auto_retry_failed"]:
+                self.notify("log", f"Retrying {len(failed_idx)} failed "
+                            "track(s) once more...")
+                retried = await asyncio.gather(
+                    *(attempt(i, self.playlist.tracks[i])
+                      for i in failed_idx))
+                ok += sum(1 for r in retried if r is True)
+                failed_idx = [i for i, r in zip(failed_idx, retried)
+                              if r is False]
+            fail = len(failed_idx)
         finally:
-            await session.stop()
+            # The session stays connected for chat and the next run
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
         self.notify("finished", ok, fail)
@@ -293,8 +285,8 @@ class Worker:
             try:
                 path = await session.download(
                     cand,
-                    progress=lambda done, total: self.notify(
-                        "progress", index, done, total),
+                    progress=lambda done, total, rate: self.notify(
+                        "progress", index, done, total, rate),
                     stall_timeout=stall_timeout)
             except SoulseekError as exc:
                 if "queue" in str(exc).lower():

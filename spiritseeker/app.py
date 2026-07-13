@@ -10,6 +10,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from . import APP_NAME, __version__
 from .config import Config
+from .connection import ConnectionManager
 from .spotify import Playlist, SpotifyError, fetch_playlist, import_csv
 from .workflow import Status, Worker
 
@@ -48,6 +49,81 @@ def palette(dark: bool) -> dict:
     return DARK if dark else LIGHT
 
 
+def show_toast(window: tk.Misc, title: str, message: str):
+    """Windows tray balloon/toast via Shell_NotifyIcon (pure ctypes)."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class NOTIFYICONDATAW(ctypes.Structure):
+            _fields_ = [
+                ("cbSize", wintypes.DWORD),
+                ("hWnd", wintypes.HWND),
+                ("uID", wintypes.UINT),
+                ("uFlags", wintypes.UINT),
+                ("uCallbackMessage", wintypes.UINT),
+                ("hIcon", wintypes.HICON),
+                ("szTip", ctypes.c_wchar * 128),
+                ("dwState", wintypes.DWORD),
+                ("dwStateMask", wintypes.DWORD),
+                ("szInfo", ctypes.c_wchar * 256),
+                ("uVersion", wintypes.UINT),
+                ("szInfoTitle", ctypes.c_wchar * 64),
+                ("dwInfoFlags", wintypes.DWORD),
+                ("guidItem", ctypes.c_byte * 16),
+                ("hBalloonIcon", wintypes.HICON),
+            ]
+
+        NIM_ADD, NIM_DELETE = 0x0, 0x2
+        NIF_ICON, NIF_TIP, NIF_INFO = 0x2, 0x4, 0x10
+        NIIF_INFO = 0x1
+
+        hwnd = ctypes.windll.user32.GetParent(window.winfo_id())
+        data = NOTIFYICONDATAW()
+        data.cbSize = ctypes.sizeof(NOTIFYICONDATAW)
+        data.hWnd = hwnd
+        data.uID = 0x5EEC
+        data.uFlags = NIF_ICON | NIF_TIP | NIF_INFO
+        data.hIcon = ctypes.windll.user32.LoadIconW(None, 32512)  # IDI_APPLICATION
+        data.szTip = APP_NAME
+        data.szInfo = message[:255]
+        data.szInfoTitle = title[:63]
+        data.dwInfoFlags = NIIF_INFO
+        ctypes.windll.shell32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(data))
+
+        def cleanup():
+            try:
+                ctypes.windll.shell32.Shell_NotifyIconW(
+                    NIM_DELETE, ctypes.byref(data))
+            except Exception:
+                pass
+        window.after(10000, cleanup)
+    except Exception:
+        pass
+
+
+def flash_taskbar(window: tk.Misc):
+    """Flash the taskbar button until the window gets focus."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class FLASHWINFO(ctypes.Structure):
+            _fields_ = [("cbSize", wintypes.UINT),
+                        ("hwnd", wintypes.HWND),
+                        ("dwFlags", wintypes.DWORD),
+                        ("uCount", wintypes.UINT),
+                        ("dwTimeout", wintypes.DWORD)]
+
+        FLASHW_ALL, FLASHW_TIMERNOFG = 0x3, 0xC
+        hwnd = ctypes.windll.user32.GetParent(window.winfo_id())
+        info = FLASHWINFO(ctypes.sizeof(FLASHWINFO), hwnd,
+                          FLASHW_ALL | FLASHW_TIMERNOFG, 0, 0)
+        ctypes.windll.user32.FlashWindowEx(ctypes.byref(info))
+    except Exception:
+        pass
+
+
 def set_titlebar_dark(window: tk.Misc, dark: bool):
     """Ask DWM for a dark title bar (Windows 10 1809+; silently no-ops)."""
     try:
@@ -75,6 +151,14 @@ class App:
         self.events: queue.Queue = queue.Queue()
         self.track_paths: dict[int, str] = {}
         self.skip_requests: set[int] = set()
+        self.conn = ConnectionManager(self.config,
+                                      lambda *event: self.events.put(event))
+        # Chat state lives here so the window can close without losing it
+        self.chat_window = None
+        self.pm_history: dict[str, list[tuple[str, str, str]]] = {}
+        self.room_history: dict[str, list[tuple[str, str, str]]] = {}
+        self.joined_rooms: set[str] = set()
+        self.unread_chats = 0
 
         root.title(f"{APP_NAME} v{__version__}")
         root.geometry("980x680")
@@ -192,6 +276,9 @@ class App:
         ttk.Button(bar, text="Settings...",
                    command=self.open_settings_dialog).pack(side="right",
                                                            padx=(0, 6))
+        self.chat_btn = ttk.Button(bar, text="Chat...",
+                                   command=self.open_chat)
+        self.chat_btn.pack(side="right", padx=(0, 6))
         self.dark_var = tk.BooleanVar(value=self.config["dark_mode"])
 
     # ---------------------------------------------------------------- theme
@@ -288,6 +375,7 @@ class App:
         else:
             self.log("Generated a new Soulseek identity.")
         self._refresh_identity_label()
+        self.conn.submit(self.conn.reset())
 
     def open_account_dialog(self):
         if self.worker:
@@ -300,6 +388,23 @@ class App:
         username, _, is_custom = self.config.effective_credentials()
         self.log(f"Soulseek settings saved - logging in as {username} "
                  f"({'your account' if is_custom else 'rotating identity'}).")
+        self.conn.submit(self.conn.reset())
+
+    # ----------------------------------------------------------------- chat
+
+    def open_chat(self):
+        from .chat import ChatWindow
+        if self.chat_window is None or not self.chat_window.winfo_exists():
+            self.chat_window = ChatWindow(self)
+        else:
+            self.chat_window.lift()
+        self.unread_chats = 0
+        self._update_chat_button()
+
+    def _update_chat_button(self):
+        label = "Chat..." if not self.unread_chats \
+            else f"Chat ({self.unread_chats})..."
+        self.chat_btn.configure(text=label)
 
     def load_playlist(self):
         url = self.url_var.get().strip()
@@ -362,6 +467,7 @@ class App:
 
         self.worker = Worker(self.playlist, self.config,
                              lambda *event: self.events.put(event),
+                             manager=self.conn,
                              should_skip=lambda i: i in self.skip_requests)
         self.worker.start()
 
@@ -498,7 +604,7 @@ class App:
             self.events.put(event)
 
         self.log(f"Retrying: {track.artist} - {track.title}")
-        self.worker = Worker(single, self.config, remapped)
+        self.worker = Worker(single, self.config, remapped, manager=self.conn)
         self.worker.start()
 
     # ------------------------------------------------------- event pump
@@ -531,17 +637,68 @@ class App:
             if status in (Status.DONE, Status.SKIPPED, Status.FAILED):
                 self.progress.step(1)
         elif kind == "progress":
-            _, index, done, total = event
+            _, index, done, total, rate = event
             if total:
-                pct = done * 100 // total
+                pct = min(done * 100 // total, 100)
+                blocks = pct // 10
+                bar = "█" * blocks + "░" * (10 - blocks)
+                if rate >= 1024 * 1024:
+                    rate_s = f"  {rate / (1024 * 1024):.1f} MB/s"
+                elif rate > 0:
+                    rate_s = f"  {rate / 1024:.0f} KB/s"
+                else:
+                    rate_s = ""
                 current = self.tree.item(str(index))["values"]
                 self.tree.item(str(index), values=(
                     *current[:3], Status.DOWNLOADING.value,
-                    f"{pct}% of {total / (1024 * 1024):.1f}MB"))
+                    f"{bar} {pct}% of {total / (1024 * 1024):.1f}MB{rate_s}"))
         elif kind == "track_path":
             self.track_paths[event[1]] = event[2]
         elif kind == "log":
             self.log(event[1])
+        elif kind == "chat_connected":
+            self._refresh_identity_label()
+        elif kind == "pm":
+            _, username, message, _direct = event
+            import time as _time
+            stamp = _time.strftime("%H:%M")
+            self.pm_history.setdefault(username, []).append(
+                (stamp, username, message))
+            if self.chat_window and self.chat_window.winfo_exists():
+                self.chat_window.refresh_pms()
+            else:
+                self.unread_chats += 1
+                self._update_chat_button()
+                self.log(f"[PM] {username}: {message}")
+        elif kind == "room_msg":
+            _, room, username, message = event
+            import time as _time
+            stamp = _time.strftime("%H:%M")
+            self.room_history.setdefault(room, []).append(
+                (stamp, username, message))
+            if self.chat_window and self.chat_window.winfo_exists():
+                self.chat_window.refresh_rooms()
+        elif kind == "room_list":
+            if self.chat_window and self.chat_window.winfo_exists():
+                self.chat_window.set_room_list(event[1])
+        elif kind == "room_joined":
+            _, room, username = event
+            me = self.config.effective_credentials()[0]
+            import time as _time
+            stamp = _time.strftime("%H:%M")
+            if username is None or username == me:
+                self.joined_rooms.add(room)
+                self.room_history.setdefault(room, []).append(
+                    (stamp, "*", "you joined the room"))
+            else:
+                self.room_history.setdefault(room, []).append(
+                    (stamp, "*", f"{username} joined"))
+            if self.chat_window and self.chat_window.winfo_exists():
+                self.chat_window.refresh_rooms(select=room)
+        elif kind == "room_left":
+            self.joined_rooms.discard(event[1])
+            if self.chat_window and self.chat_window.winfo_exists():
+                self.chat_window.refresh_rooms()
         elif kind == "finished":
             _, ok, failed = event
             self.worker = None
@@ -551,6 +708,15 @@ class App:
             if ok >= 0:
                 self.summary_var.set(f"Finished: {ok} ok, {failed} failed")
                 self.log(f"Finished. {ok} tracks ok, {failed} failed.")
+                if self.config["notify_on_finish"]:
+                    try:
+                        import winsound
+                        winsound.MessageBeep(winsound.MB_ICONASTERISK)
+                    except Exception:
+                        pass
+                    show_toast(self.root, f"{APP_NAME} finished",
+                               f"{ok} tracks ok, {failed} failed")
+                    flash_taskbar(self.root)
             else:
                 self.summary_var.set("Stopped")
         elif kind == "fatal":
@@ -610,12 +776,23 @@ class SettingsDialog(tk.Toplevel):
             config["stall_timeout_sec"])
         self.attempts_var = spin_row(
             2, "Sources to try per track:", 1, 10, config["max_attempts"])
+        self.concurrent_var = spin_row(
+            3, "Simultaneous downloads:", 1, 4,
+            config["concurrent_downloads"])
         ttk.Label(
             dls, style="Subtle.TLabel", wraplength=430, justify="left",
             text="The track timeout only counts searching and waiting in "
                  "peers' queues - a download that is still receiving data is "
                  "never cut off, however slow.",
-        ).pack(anchor="w", padx=8, pady=(0, 8))
+        ).pack(anchor="w", padx=8, pady=(0, 4))
+        self.retry_var = tk.BooleanVar(value=bool(config["auto_retry_failed"]))
+        ttk.Checkbutton(
+            dls, text="Retry failed tracks once at the end of a run",
+            variable=self.retry_var).pack(anchor="w", padx=8, pady=(0, 2))
+        self.notify_var = tk.BooleanVar(value=bool(config["notify_on_finish"]))
+        ttk.Checkbutton(
+            dls, text="Notification and sound when a run finishes",
+            variable=self.notify_var).pack(anchor="w", padx=8, pady=(0, 8))
 
         # --- buttons ---
         btns = ttk.Frame(self)
@@ -638,6 +815,8 @@ class SettingsDialog(tk.Toplevel):
             timeout = clamped(self.timeout_var, 1, 120, "Track timeout")
             stall = clamped(self.stall_var, 10, 600, "Stall timeout")
             attempts = clamped(self.attempts_var, 1, 10, "Sources to try")
+            concurrent = clamped(self.concurrent_var, 1, 4,
+                                 "Simultaneous downloads")
         except ValueError as exc:
             messagebox.showerror(APP_NAME, str(exc), parent=self)
             return
@@ -646,6 +825,9 @@ class SettingsDialog(tk.Toplevel):
         cfg["track_timeout_min"] = timeout
         cfg["stall_timeout_sec"] = stall
         cfg["max_attempts"] = attempts
+        cfg["concurrent_downloads"] = concurrent
+        cfg["auto_retry_failed"] = bool(self.retry_var.get())
+        cfg["notify_on_finish"] = bool(self.notify_var.get())
         cfg.save()
         self.destroy()
         self.on_saved()
