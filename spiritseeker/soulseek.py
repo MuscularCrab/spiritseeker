@@ -222,6 +222,9 @@ class SoulseekSession:
         self.client = SoulSeekClient(settings)
         self._search_times: deque[float] = deque()
         self._warned_pacing = False
+        # Cumulative time spent sleeping for the search rate limit; lets the
+        # workflow exclude pacing from per-track time budgets
+        self.total_paced_sec = 0.0
 
     async def start(self):
         try:
@@ -259,6 +262,7 @@ class SoulseekSession:
                           "limit - large playlists take a little longer but "
                           "keep returning results.")
             await asyncio.sleep(wait)
+            self.total_paced_sec += wait
             now = time.monotonic()
             while (self._search_times
                     and now - self._search_times[0] > SEARCH_WINDOW_SEC):
@@ -293,16 +297,17 @@ class SoulseekSession:
     async def download(self, candidate: Candidate,
                        progress: Optional[Callable[[int, int], None]] = None,
                        queue_timeout: float = 180.0,
-                       stall_timeout: float = 60.0,
-                       total_timeout: float = 900.0) -> str:
+                       stall_timeout: float = 60.0) -> str:
         """Download a search result. Returns the local file path.
+
+        A transfer that keeps receiving data is never timed out, no matter
+        how slow - only queue waits and stalls are bounded.
 
         Raises SoulseekError on failure/timeout; the partial file is removed.
         """
         transfer = await self.client.transfers.download(
             candidate.username, candidate.remote_path)
 
-        elapsed = 0.0
         stalled = 0.0
         queued = 0.0
         last_bytes = -1
@@ -310,7 +315,6 @@ class SoulseekSession:
         try:
             while True:
                 await asyncio.sleep(poll)
-                elapsed += poll
                 state = transfer.state.VALUE
 
                 if state == TransferState.COMPLETE:
@@ -339,9 +343,6 @@ class SoulseekSession:
                     queued += poll
                     if queued >= queue_timeout:
                         raise SoulseekError("Stuck in peer's queue")
-
-                if elapsed >= total_timeout:
-                    raise SoulseekError("Transfer timed out")
         except (SoulseekError, asyncio.CancelledError):
             try:
                 await self.client.transfers.abort(transfer)

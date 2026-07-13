@@ -74,6 +74,7 @@ class App:
         self.worker: Worker | None = None
         self.events: queue.Queue = queue.Queue()
         self.track_paths: dict[int, str] = {}
+        self.skip_requests: set[int] = set()
 
         root.title(f"{APP_NAME} v{__version__}")
         root.geometry("980x680")
@@ -188,17 +189,21 @@ class App:
                    command=self.open_account_dialog).pack(side="right")
         ttk.Button(bar, text="New identity",
                    command=self.new_identity).pack(side="right", padx=(0, 6))
+        ttk.Button(bar, text="Settings...",
+                   command=self.open_settings_dialog).pack(side="right",
+                                                           padx=(0, 6))
         self.dark_var = tk.BooleanVar(value=self.config["dark_mode"])
-        ttk.Checkbutton(bar, text="Dark mode", variable=self.dark_var,
-                        command=self._toggle_dark).pack(side="right",
-                                                        padx=(0, 12))
 
     # ---------------------------------------------------------------- theme
 
-    def _toggle_dark(self):
-        self.config["dark_mode"] = bool(self.dark_var.get())
-        self.config.save()
+    def open_settings_dialog(self):
+        SettingsDialog(self.root, self.config,
+                       on_saved=self._on_settings_saved)
+
+    def _on_settings_saved(self):
+        self.dark_var.set(bool(self.config["dark_mode"]))
         self._apply_theme()
+        self.log("Settings saved.")
 
     def _apply_theme(self):
         dark = bool(self.dark_var.get())
@@ -325,6 +330,7 @@ class App:
     def _set_playlist(self, playlist: Playlist):
         self.playlist = playlist
         self.track_paths.clear()
+        self.skip_requests.clear()
         self.tree.delete(*self.tree.get_children())
         for i, track in enumerate(playlist.tracks):
             self.tree.insert("", "end", iid=str(i), values=(
@@ -355,7 +361,8 @@ class App:
             value=0, maximum=max(len(self.playlist.tracks), 1))
 
         self.worker = Worker(self.playlist, self.config,
-                             lambda *event: self.events.put(event))
+                             lambda *event: self.events.put(event),
+                             should_skip=lambda i: i in self.skip_requests)
         self.worker.start()
 
     def stop_downloads(self):
@@ -402,6 +409,13 @@ class App:
                        else "Download again")
         menu.add_command(label=retry_label, command=self._retry_selected,
                          state="normal" if can_retry else "disabled")
+        if status == Status.PENDING.value or index in self.skip_requests:
+            if index in self.skip_requests:
+                menu.add_command(label="Include in downloads",
+                                 command=lambda: self._set_skip(index, False))
+            else:
+                menu.add_command(label="Skip download",
+                                 command=lambda: self._set_skip(index, True))
         try:
             menu.tk_popup(event.x_root, event.y_root)
         finally:
@@ -437,10 +451,24 @@ class App:
             self.root.clipboard_clear()
             self.root.clipboard_append(f"{track.artist} - {track.title}")
 
+    def _set_skip(self, index: int, skip: bool):
+        track = self.playlist.tracks[index]
+        if skip:
+            self.skip_requests.add(index)
+            self.tree.item(str(index), values=(
+                index + 1, track.title, track.artist, Status.SKIPPED.value,
+                "skipped by you"), tags=(Status.SKIPPED.name,))
+        else:
+            self.skip_requests.discard(index)
+            self.tree.item(str(index), values=(
+                index + 1, track.title, track.artist, Status.PENDING.value,
+                ""), tags=(Status.PENDING.name,))
+
     def _retry_selected(self):
         index = self._selected_index()
         if index is None or self.worker:
             return
+        self.skip_requests.discard(index)
         track = self.playlist.tracks[index]
         # Downloading again shouldn't hit the already-in-folder skip
         old = self.track_paths.pop(index, None)
@@ -532,6 +560,95 @@ class App:
             self.stop_btn.configure(state="disabled")
             self.summary_var.set("Error")
             messagebox.showerror(APP_NAME, event[1])
+
+
+class SettingsDialog(tk.Toplevel):
+    """General app settings."""
+
+    def __init__(self, parent: tk.Tk, config, on_saved):
+        super().__init__(parent)
+        self.config_obj = config
+        self.on_saved = on_saved
+        self.title("Settings")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+        p = palette(bool(config["dark_mode"]))
+        self.configure(bg=p["bg"])
+        set_titlebar_dark(self, bool(config["dark_mode"]))
+
+        pad = {"padx": 10, "pady": 4}
+
+        # --- appearance ---
+        looks = ttk.LabelFrame(self, text="Appearance")
+        looks.pack(fill="x", **pad)
+        self.dark_var = tk.BooleanVar(value=bool(config["dark_mode"]))
+        ttk.Checkbutton(looks, text="Dark mode",
+                        variable=self.dark_var).pack(anchor="w", padx=8,
+                                                     pady=6)
+
+        # --- downloads ---
+        dls = ttk.LabelFrame(self, text="Downloads")
+        dls.pack(fill="x", **pad)
+        grid = ttk.Frame(dls)
+        grid.pack(fill="x", padx=8, pady=6)
+
+        def spin_row(row, label, from_, to, value):
+            ttk.Label(grid, text=label).grid(row=row, column=0, sticky="w",
+                                             pady=2)
+            var = tk.StringVar(value=str(value))
+            ttk.Spinbox(grid, textvariable=var, from_=from_, to=to,
+                        width=6).grid(row=row, column=1, sticky="w",
+                                      padx=8, pady=2)
+            return var
+
+        self.timeout_var = spin_row(
+            0, "Give up on a track after (minutes):", 1, 120,
+            config["track_timeout_min"])
+        self.stall_var = spin_row(
+            1, "Cancel a download after no data for (seconds):", 10, 600,
+            config["stall_timeout_sec"])
+        self.attempts_var = spin_row(
+            2, "Sources to try per track:", 1, 10, config["max_attempts"])
+        ttk.Label(
+            dls, style="Subtle.TLabel", wraplength=430, justify="left",
+            text="The track timeout only counts searching and waiting in "
+                 "peers' queues - a download that is still receiving data is "
+                 "never cut off, however slow.",
+        ).pack(anchor="w", padx=8, pady=(0, 8))
+
+        # --- buttons ---
+        btns = ttk.Frame(self)
+        btns.pack(fill="x", padx=10, pady=(0, 10))
+        ttk.Button(btns, text="Save", command=self._save).pack(side="right")
+        ttk.Button(btns, text="Cancel",
+                   command=self.destroy).pack(side="right", padx=(0, 6))
+
+    def _save(self):
+        def clamped(var, lo, hi, name):
+            try:
+                value = int(var.get().strip())
+            except ValueError:
+                raise ValueError(f"{name} must be a whole number.")
+            if not lo <= value <= hi:
+                raise ValueError(f"{name} must be between {lo} and {hi}.")
+            return value
+
+        try:
+            timeout = clamped(self.timeout_var, 1, 120, "Track timeout")
+            stall = clamped(self.stall_var, 10, 600, "Stall timeout")
+            attempts = clamped(self.attempts_var, 1, 10, "Sources to try")
+        except ValueError as exc:
+            messagebox.showerror(APP_NAME, str(exc), parent=self)
+            return
+        cfg = self.config_obj
+        cfg["dark_mode"] = bool(self.dark_var.get())
+        cfg["track_timeout_min"] = timeout
+        cfg["stall_timeout_sec"] = stall
+        cfg["max_attempts"] = attempts
+        cfg.save()
+        self.destroy()
+        self.on_saved()
 
 
 class AccountDialog(tk.Toplevel):

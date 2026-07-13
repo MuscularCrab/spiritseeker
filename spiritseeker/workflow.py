@@ -10,6 +10,7 @@ import os
 import re
 import shutil
 import threading
+import time
 from enum import Enum
 from typing import Callable, Optional
 
@@ -19,7 +20,6 @@ from .soulseek import (Candidate, SoulseekError, SoulseekSession,
                        build_queries, pick_listening_port, rank_candidates)
 from .spotify import Playlist, Track
 
-MAX_CANDIDATE_ATTEMPTS = 5
 # Consecutive tracks with zero raw search results before we assume the
 # server is rate-limiting us and cool down
 EMPTY_STREAK_LIMIT = 3
@@ -30,6 +30,11 @@ MAX_COOLDOWNS = 5
 class SearchRateLimited(Exception):
     """Searches are coming back empty in a way that smells like server-side
     rate limiting rather than genuinely unfindable tracks."""
+
+
+class TrackTimeout(Exception):
+    """The track's time budget ran out while searching or queue-waiting.
+    Never raised while a download is actually receiving data."""
 
 
 class Status(str, Enum):
@@ -84,10 +89,12 @@ class Worker:
     """
 
     def __init__(self, playlist: Playlist, config: Config,
-                 notify: Callable[..., None]):
+                 notify: Callable[..., None],
+                 should_skip: Optional[Callable[[int], bool]] = None):
         self.playlist = playlist
         self.config = config
         self.notify = notify
+        self.should_skip = should_skip
         self._thread: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._main_task: Optional[asyncio.Task] = None
@@ -160,6 +167,9 @@ class Worker:
         ok = fail = 0
         try:
             for index, track in enumerate(self.playlist.tracks):
+                if self.should_skip and self.should_skip(index):
+                    self.notify("track", index, Status.SKIPPED, "skipped by you")
+                    continue
                 done = await self._run_one(session, index, track,
                                            output_dir, tmp_dir, track_timeout)
                 if done:
@@ -176,10 +186,9 @@ class Worker:
                        track: Track, output_dir: str, tmp_dir: str,
                        track_timeout: int, allow_cooldown: bool = True) -> bool:
         try:
-            return await asyncio.wait_for(
-                self._process_track(session, index, track,
-                                    output_dir, tmp_dir),
-                timeout=track_timeout)
+            return await self._process_track(session, index, track,
+                                             output_dir, tmp_dir,
+                                             timeout_sec=track_timeout)
         except asyncio.CancelledError:
             raise
         except SearchRateLimited:
@@ -199,7 +208,7 @@ class Worker:
                                            allow_cooldown=False)
             self.notify("track", index, Status.FAILED, "no sources found")
             return False
-        except TimeoutError:
+        except TrackTimeout:
             self.notify("track", index, Status.FAILED,
                         f"gave up after {track_timeout // 60} min "
                         "(not found or peers too slow)")
@@ -209,7 +218,8 @@ class Worker:
             return False
 
     async def _process_track(self, session: SoulseekSession, index: int,
-                             track: Track, output_dir: str, tmp_dir: str) -> bool:
+                             track: Track, output_dir: str, tmp_dir: str,
+                             timeout_sec: int) -> bool:
         existing = already_downloaded(track, output_dir)
         if existing:
             self.notify("track_path", index, existing)
@@ -219,10 +229,22 @@ class Worker:
         strict = not self.config["allow_lower_quality"]
         spectral = bool(self.config["spectral_check"])
 
+        start = time.monotonic()
+        paced_at_start = session.total_paced_sec
+
+        def out_of_time() -> bool:
+            # Global search pacing isn't this track's fault - exclude it.
+            # Checked only between steps, so an in-flight download that is
+            # still receiving data always runs to completion.
+            paced = session.total_paced_sec - paced_at_start
+            return time.monotonic() - start - paced > timeout_sec
+
         # --- search ---
         self.notify("track", index, Status.SEARCHING, "")
         candidates: list[Candidate] = []
         for query in build_queries(track):
+            if out_of_time():
+                raise TrackTimeout()
             found = await session.search(query)
             candidates.extend(found)
             ranked = rank_candidates(track, candidates, require_320=strict)
@@ -254,21 +276,26 @@ class Worker:
         report = None
         rejected_note = ""
         stuck_users: set[str] = set()
+        max_attempts = max(1, int(self.config["max_attempts"]))
+        stall_timeout = max(10, int(self.config["stall_timeout_sec"]))
         attempt = 0
         for cand in ranked:
-            if attempt >= MAX_CANDIDATE_ATTEMPTS:
+            if attempt >= max_attempts:
                 break
+            if attempt and out_of_time():
+                raise TrackTimeout()
             if cand.username in stuck_users:
                 continue    # their queue already timed out on us once
             attempt += 1
             self.notify("track", index, Status.DOWNLOADING,
-                        f"[{attempt}/{min(len(ranked), MAX_CANDIDATE_ATTEMPTS)}] "
+                        f"[{attempt}/{min(len(ranked), max_attempts)}] "
                         f"{cand.describe()}")
             try:
                 path = await session.download(
                     cand,
                     progress=lambda done, total: self.notify(
-                        "progress", index, done, total))
+                        "progress", index, done, total),
+                    stall_timeout=stall_timeout)
             except SoulseekError as exc:
                 if "queue" in str(exc).lower():
                     stuck_users.add(cand.username)

@@ -40,10 +40,12 @@
 6. **Saves everything flat** as `Artist - Title.ext` in your chosen folder,
    skipping tracks you already have.
 
-Tracks that can't be found on Soulseek (or whose peers are too slow) are
-given up on after 8 minutes and marked failed, so a rare song never stalls
-the rest of the playlist. The timeout is configurable via `track_timeout_min`
-in the config file.
+Tracks that can't be found on Soulseek (or whose peers never start sending)
+are given up on after 8 minutes and marked failed, so a rare song never
+stalls the rest of the playlist. The timeout only counts searching and
+queue waiting — a download that's still receiving data is never cut off,
+however slow the peer. Tune all of this in **Settings...**: track timeout,
+stall timeout, and how many sources to try per track.
 
 Searches are paced (about 30 per 220 seconds) because the Soulseek server
 silently drops searches from clients that fire too many too fast — without
@@ -52,9 +54,10 @@ the server rate-limits us anyway, SpiritSeeker notices the empty-result
 streak, cools down for a few minutes, and picks up where it left off.
 
 Right-click any track for the useful stuff: **Play**, **Open folder
-location**, **Copy file path**, **Copy "Artist - Title"**, and **Retry
-download** / **Download again**. Double-click plays the file. And yes,
-there's a dark mode toggle.
+location**, **Copy file path**, **Copy "Artist - Title"**, **Retry
+download** / **Download again**, and **Skip download** to leave songs out
+of a run. Double-click plays the file. Dark mode is on by default
+(toggle it in Settings).
 
 ## Quality rules
 

@@ -41,9 +41,14 @@ DEFAULTS = {
     "allow_lower_quality": False,
     "spectral_check": True,
     "listening_port": 61000,
-    # Give up on a track (search + all download attempts) after this long
+    # Give up on a track after this long - only counts searching and queue
+    # waiting; a download that is actually receiving data is never cut off
     "track_timeout_min": 8,
-    "dark_mode": False,
+    # Cancel a download when no data arrives for this long
+    "stall_timeout_sec": 60,
+    # How many sources to try per track before giving up
+    "max_attempts": 5,
+    "dark_mode": True,
 }
 
 
