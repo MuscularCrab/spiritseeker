@@ -215,15 +215,16 @@ class App:
         # --- track table ---
         table_frame = ttk.Frame(self.root)
         table_frame.pack(fill="both", expand=True, **pad)
-        columns = ("num", "title", "artist", "status", "detail")
+        columns = ("num", "title", "artist", "file", "status", "detail")
         self.tree = ttk.Treeview(table_frame, columns=columns, show="headings",
                                  selectmode="browse")
         for col, text, width, stretch in (
                 ("num", "#", 36, False),
-                ("title", "Title", 240, True),
-                ("artist", "Artist", 180, True),
-                ("status", "Status", 100, False),
-                ("detail", "Details", 320, True)):
+                ("title", "Title", 190, True),
+                ("artist", "Artist", 140, True),
+                ("file", "Source file", 260, True),
+                ("status", "Status", 95, False),
+                ("detail", "Details", 300, True)):
             self.tree.heading(col, text=text)
             self.tree.column(col, width=width, stretch=stretch,
                              anchor="w" if col != "num" else "e")
@@ -440,7 +441,8 @@ class App:
         self.tree.delete(*self.tree.get_children())
         for i, track in enumerate(playlist.tracks):
             self.tree.insert("", "end", iid=str(i), values=(
-                i + 1, track.title, track.artist, Status.PENDING.value, ""),
+                i + 1, track.title, track.artist, "",
+                Status.PENDING.value, ""),
                 tags=(Status.PENDING.name,))
         self.summary_var.set(
             f"{playlist.name} - {len(playlist.tracks)} tracks")
@@ -579,16 +581,19 @@ class App:
 
     def _set_skip(self, index: int, skip: bool):
         track = self.playlist.tracks[index]
+        current = self.tree.item(str(index))["values"]
+        file_cell = current[3] if len(current) > 3 else ""
         if skip:
             self.skip_requests.add(index)
             self.tree.item(str(index), values=(
-                index + 1, track.title, track.artist, Status.SKIPPED.value,
-                "skipped by you"), tags=(Status.SKIPPED.name,))
+                index + 1, track.title, track.artist, file_cell,
+                Status.SKIPPED.value, "skipped by you"),
+                tags=(Status.SKIPPED.name,))
         else:
             self.skip_requests.discard(index)
             self.tree.item(str(index), values=(
-                index + 1, track.title, track.artist, Status.PENDING.value,
-                ""), tags=(Status.PENDING.name,))
+                index + 1, track.title, track.artist, file_cell,
+                Status.PENDING.value, ""), tags=(Status.PENDING.name,))
 
     def _retry_selected(self):
         index = self._selected_index()
@@ -619,7 +624,7 @@ class App:
         single = Playlist(name=str(track), tracks=[track])
 
         def remapped(*event):
-            if event[0] in ("track", "track_path", "progress"):
+            if event[0] in ("track", "track_path", "track_file", "progress"):
                 event = (event[0], index) + event[2:]
             self.events.put(event)
 
@@ -651,12 +656,21 @@ class App:
         elif kind == "track":
             _, index, status, detail = event
             track = self.playlist.tracks[index]
+            current = self.tree.item(str(index))["values"]
+            file_cell = current[3] if len(current) > 3 else ""
             self.tree.item(str(index), values=(
-                index + 1, track.title, track.artist, status.value, detail),
+                index + 1, track.title, track.artist, file_cell,
+                status.value, detail),
                 tags=(status.name,))
             self.tree.see(str(index))
             if status in (Status.DONE, Status.SKIPPED, Status.FAILED):
                 self.progress.step(1)
+        elif kind == "track_file":
+            _, index, filename = event
+            current = self.tree.item(str(index))["values"]
+            if len(current) >= 6:
+                self.tree.item(str(index), values=(
+                    *current[:3], filename, *current[4:]))
         elif kind == "progress":
             _, index, done, total, rate = event
             if total:
@@ -671,7 +685,7 @@ class App:
                     rate_s = ""
                 current = self.tree.item(str(index))["values"]
                 self.tree.item(str(index), values=(
-                    *current[:3], Status.DOWNLOADING.value,
+                    *current[:4], Status.DOWNLOADING.value,
                     f"{bar} {pct}% of {total / (1024 * 1024):.1f}MB{rate_s}"))
         elif kind == "track_path":
             self.track_paths[event[1]] = event[2]

@@ -85,6 +85,7 @@ class Worker:
     ``notify`` is called from the connection thread with:
         ("track", index, Status, detail_str)
         ("track_path", index, local_file_path)
+        ("track_file", index, source_filename)
         ("progress", index, done_bytes, total_bytes, rate_bytes_per_sec)
         ("log", message)
         ("finished", ok_count, fail_count)
@@ -243,6 +244,7 @@ class Worker:
         existing = already_downloaded(track, output_dir)
         if existing:
             self.notify("track_path", index, existing)
+            self.notify("track_file", index, os.path.basename(existing))
             self.notify("track", index, Status.SKIPPED, "already in folder")
             return True
 
@@ -307,6 +309,7 @@ class Worker:
             if cand.username in stuck_users:
                 continue    # their queue already timed out on us once
             attempt += 1
+            self.notify("track_file", index, cand.basename)
             tag = f"[{attempt}/{min(len(ranked), max_attempts)}]"
             empty_bar = "░" * 10
             self.notify("track", index, Status.DOWNLOADING,
