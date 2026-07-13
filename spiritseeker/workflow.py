@@ -242,11 +242,15 @@ class Worker:
                              track: Track, output_dir: str, tmp_dir: str,
                              timeout_sec: int) -> bool:
         existing = already_downloaded(track, output_dir)
-        if existing:
+        overwrite = bool(self.config["overwrite_duplicates"])
+        if existing and not overwrite:
             self.notify("track_path", index, existing)
             self.notify("track_file", index, os.path.basename(existing))
             self.notify("track", index, Status.SKIPPED, "already in folder")
             return True
+        if existing:
+            self.notify("log", f"{track}: will replace existing "
+                        f"{os.path.basename(existing)} (overwrite is on)")
 
         strict = not self.config["allow_lower_quality"]
         spectral = bool(self.config["spectral_check"])
@@ -376,6 +380,12 @@ class Worker:
             self.notify("log", f"{track}: {tag_note}: {exc}")
 
         # --- move into place ---
+        # Only now that the new copy is verified is the old one replaced
+        if existing and overwrite:
+            try:
+                os.remove(existing)
+            except OSError:
+                pass
         ext = local_path.rsplit(".", 1)[-1].lower()
         dest = final_path_for(track, ext, output_dir)
         shutil.move(local_path, dest)

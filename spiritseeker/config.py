@@ -52,6 +52,9 @@ DEFAULTS = {
     "concurrent_downloads": 2,
     # After the playlist finishes, make one more pass over failed tracks
     "auto_retry_failed": True,
+    # Re-download and replace songs that already exist in the save folder
+    # instead of skipping them
+    "overwrite_duplicates": False,
     # Toast + sound when a run completes
     "notify_on_finish": True,
     "dark_mode": True,

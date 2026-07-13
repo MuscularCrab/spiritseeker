@@ -500,9 +500,13 @@ class App:
         index = int(row)
         track = self.playlist.tracks[index]
         has_file = self._selected_file() is not None
-        status = str(self.tree.item(row)["values"][4])
+        values = self.tree.item(row)["values"]
+        status = str(values[4])
+        detail = str(values[5]) if len(values) > 5 else ""
         can_retry = self.worker is None and status in (
             Status.FAILED.value, Status.DONE.value, Status.SKIPPED.value)
+        is_duplicate = (status == Status.SKIPPED.value
+                        and "already in folder" in detail)
 
         menu = tk.Menu(self.tree, tearoff=0)
         menu.add_command(label="Play", command=self._play_selected,
@@ -519,6 +523,11 @@ class App:
                        else "Download again")
         menu.add_command(label=retry_label, command=self._retry_selected,
                          state="normal" if can_retry else "disabled")
+        if is_duplicate:
+            menu.add_command(
+                label="Overwrite duplicate (re-download)",
+                command=self._retry_selected,
+                state="normal" if self.worker is None else "disabled")
         active = self.worker is not None and status in (
             Status.SEARCHING.value, Status.DOWNLOADING.value,
             Status.VERIFYING.value, Status.TAGGING.value)
@@ -824,6 +833,12 @@ class SettingsDialog(tk.Toplevel):
         ttk.Checkbutton(
             dls, text="Retry failed tracks once at the end of a run",
             variable=self.retry_var).pack(anchor="w", padx=8, pady=(0, 2))
+        self.overwrite_var = tk.BooleanVar(
+            value=bool(config["overwrite_duplicates"]))
+        ttk.Checkbutton(
+            dls, text="Overwrite songs already in the save folder "
+                      "(re-download instead of skipping)",
+            variable=self.overwrite_var).pack(anchor="w", padx=8, pady=(0, 2))
         self.notify_var = tk.BooleanVar(value=bool(config["notify_on_finish"]))
         ttk.Checkbutton(
             dls, text="Notification and sound when a run finishes",
@@ -863,6 +878,7 @@ class SettingsDialog(tk.Toplevel):
         cfg["concurrent_downloads"] = concurrent
         cfg["auto_retry_failed"] = bool(self.retry_var.get())
         cfg["notify_on_finish"] = bool(self.notify_var.get())
+        cfg["overwrite_duplicates"] = bool(self.overwrite_var.get())
         cfg.save()
         self.destroy()
         self.on_saved()

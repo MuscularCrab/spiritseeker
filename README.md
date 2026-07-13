@@ -38,7 +38,10 @@
    album, year, track number) and embeds cover art from the Cover Art Archive.
    Falls back to the Spotify metadata when MusicBrainz has no match.
 6. **Saves everything flat** as `Artist - Title.ext` in your chosen folder,
-   skipping tracks you already have.
+   skipping tracks you already have. Prefer fresh copies? Enable
+   *Overwrite songs already in the save folder* in Settings (the old file
+   is only replaced after the new one passes verification), or right-click
+   a detected duplicate and pick *Overwrite duplicate (re-download)*.
 
 Tracks that can't be found on Soulseek (or whose peers never start sending)
 are given up on after 8 minutes and marked failed, so a rare song never
