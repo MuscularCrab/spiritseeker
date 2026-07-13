@@ -103,6 +103,8 @@ class Worker:
         self._future: Optional[Future] = None
         self._empty_streak = 0
         self._cooldowns_used = 0
+        self._track_tasks: dict[int, asyncio.Task] = {}
+        self._user_skipped: set[int] = set()
 
     def start(self):
         self._future = self.manager.submit(self._runner())
@@ -110,6 +112,17 @@ class Worker:
     def cancel(self):
         if self._future:
             self._future.cancel()
+
+    def skip_track(self, index: int):
+        """Cancel one in-flight track (thread-safe); it's marked skipped
+        rather than failed, and the rest of the run continues."""
+        def do_cancel():
+            self._user_skipped.add(index)
+            task = self._track_tasks.get(index)
+            if task and not task.done():
+                task.cancel()
+        if self.manager.loop:
+            self.manager.loop.call_soon_threadsafe(do_cancel)
 
     async def _runner(self):
         try:
@@ -144,17 +157,33 @@ class Worker:
             if self.should_skip and self.should_skip(index):
                 self.notify("track", index, Status.SKIPPED, "skipped by you")
                 return None
-            async with sem:
-                if self.should_skip and self.should_skip(index):
+            try:
+                async with sem:
+                    if self.should_skip and self.should_skip(index):
+                        self.notify("track", index, Status.SKIPPED,
+                                    "skipped by you")
+                        return None
+                    return await self._run_one(session, index, track,
+                                               output_dir, tmp_dir,
+                                               track_timeout)
+            except asyncio.CancelledError:
+                # A single-track skip; a full Stop cancels the whole runner
+                # and the index won't be in _user_skipped
+                if index in self._user_skipped:
                     self.notify("track", index, Status.SKIPPED,
                                 "skipped by you")
                     return None
-                return await self._run_one(session, index, track,
-                                           output_dir, tmp_dir, track_timeout)
+                raise
+
+        def spawn_all(indices) -> dict[int, asyncio.Task]:
+            self._track_tasks = {
+                i: asyncio.create_task(attempt(i, self.playlist.tracks[i]))
+                for i in indices}
+            return self._track_tasks
 
         try:
             results = await asyncio.gather(
-                *(attempt(i, t) for i, t in enumerate(self.playlist.tracks)))
+                *spawn_all(range(len(self.playlist.tracks))).values())
             ok = sum(1 for r in results if r is True)
             failed_idx = [i for i, r in enumerate(results) if r is False]
 
@@ -162,8 +191,7 @@ class Worker:
                 self.notify("log", f"Retrying {len(failed_idx)} failed "
                             "track(s) once more...")
                 retried = await asyncio.gather(
-                    *(attempt(i, self.playlist.tracks[i])
-                      for i in failed_idx))
+                    *spawn_all(failed_idx).values())
                 ok += sum(1 for r in retried if r is True)
                 failed_idx = [i for i, r in zip(failed_idx, retried)
                               if r is False]
@@ -279,15 +307,28 @@ class Worker:
             if cand.username in stuck_users:
                 continue    # their queue already timed out on us once
             attempt += 1
+            tag = f"[{attempt}/{min(len(ranked), max_attempts)}]"
+            empty_bar = "░" * 10
             self.notify("track", index, Status.DOWNLOADING,
-                        f"[{attempt}/{min(len(ranked), max_attempts)}] "
-                        f"{cand.describe()}")
+                        f"{empty_bar} connecting... {tag} {cand.describe()}")
+
+            def waiting(state_name: str, secs: float,
+                        _tag=tag, _cand=cand):
+                label = {"QUEUED": "in peer's queue",
+                         "VIRGIN": "requesting",
+                         "INITIALIZING": "connecting"}.get(
+                    state_name, state_name.lower())
+                self.notify("track", index, Status.DOWNLOADING,
+                            f"{empty_bar} {label} {int(secs)}s... "
+                            f"{_tag} {_cand.describe()}")
+
             try:
                 path = await session.download(
                     cand,
                     progress=lambda done, total, rate: self.notify(
                         "progress", index, done, total, rate),
-                    stall_timeout=stall_timeout)
+                    stall_timeout=stall_timeout,
+                    on_wait=waiting)
             except SoulseekError as exc:
                 if "queue" in str(exc).lower():
                     stuck_users.add(cand.username)

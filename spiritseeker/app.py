@@ -151,6 +151,7 @@ class App:
         self.events: queue.Queue = queue.Queue()
         self.track_paths: dict[int, str] = {}
         self.skip_requests: set[int] = set()
+        self.worker_index_map: dict[int, int] | None = None
         self.conn = ConnectionManager(self.config,
                                       lambda *event: self.events.put(event))
         # Chat state lives here so the window can close without losing it
@@ -465,6 +466,7 @@ class App:
         self.progress.configure(
             value=0, maximum=max(len(self.playlist.tracks), 1))
 
+        self.worker_index_map = None    # identity: GUI index == worker index
         self.worker = Worker(self.playlist, self.config,
                              lambda *event: self.events.put(event),
                              manager=self.conn,
@@ -515,7 +517,13 @@ class App:
                        else "Download again")
         menu.add_command(label=retry_label, command=self._retry_selected,
                          state="normal" if can_retry else "disabled")
-        if status == Status.PENDING.value or index in self.skip_requests:
+        active = self.worker is not None and status in (
+            Status.SEARCHING.value, Status.DOWNLOADING.value,
+            Status.VERIFYING.value, Status.TAGGING.value)
+        if active:
+            menu.add_command(label="Skip download",
+                             command=lambda: self._skip_active(index))
+        elif status == Status.PENDING.value or index in self.skip_requests:
             if index in self.skip_requests:
                 menu.add_command(label="Include in downloads",
                                  command=lambda: self._set_skip(index, False))
@@ -556,6 +564,18 @@ class App:
             track = self.playlist.tracks[index]
             self.root.clipboard_clear()
             self.root.clipboard_append(f"{track.artist} - {track.title}")
+
+    def _skip_active(self, index: int):
+        """Skip a track that is already searching/downloading."""
+        self.skip_requests.add(index)
+        if not self.worker:
+            return
+        local = index
+        if self.worker_index_map is not None:
+            if index not in self.worker_index_map:
+                return
+            local = self.worker_index_map[index]
+        self.worker.skip_track(local)
 
     def _set_skip(self, index: int, skip: bool):
         track = self.playlist.tracks[index]
@@ -604,6 +624,7 @@ class App:
             self.events.put(event)
 
         self.log(f"Retrying: {track.artist} - {track.title}")
+        self.worker_index_map = {index: 0}
         self.worker = Worker(single, self.config, remapped, manager=self.conn)
         self.worker.start()
 

@@ -297,11 +297,14 @@ class SoulseekSession:
     async def download(self, candidate: Candidate,
                        progress: Optional[Callable[[int, int, float], None]] = None,
                        queue_timeout: float = 180.0,
-                       stall_timeout: float = 60.0) -> str:
+                       stall_timeout: float = 60.0,
+                       on_wait: Optional[Callable[[str, float], None]] = None) -> str:
         """Download a search result. Returns the local file path.
 
         ``progress`` is called with (bytes_done, bytes_total,
         rate_bytes_per_sec); the rate is smoothed over a ~5s window.
+        ``on_wait`` is called roughly every 2s while the transfer has not
+        started, with (state_name, seconds_waited) - e.g. ("QUEUED", 34.0).
 
         A transfer that keeps receiving data is never timed out, no matter
         how slow - only queue waits and stalls are bounded.
@@ -355,6 +358,8 @@ class SoulseekSession:
                         raise SoulseekError("Transfer stalled")
                 else:
                     queued += poll
+                    if on_wait and (queued % 2.0) < poll:
+                        on_wait(getattr(state, "name", str(state)), queued)
                     if queued >= queue_timeout:
                         raise SoulseekError("Stuck in peer's queue")
         except (SoulseekError, asyncio.CancelledError):

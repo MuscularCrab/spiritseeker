@@ -56,8 +56,10 @@ streak, cools down for a few minutes, and picks up where it left off.
 Right-click any track for the useful stuff: **Play**, **Open folder
 location**, **Copy file path**, **Copy "Artist - Title"**, **Retry
 download** / **Download again**, and **Skip download** to leave songs out
-of a run. Double-click plays the file. Dark mode is on by default
-(toggle it in Settings).
+of a run — including tracks that are already searching or downloading;
+skipping one cancels its transfer and the rest of the run continues.
+Double-click plays the file. Dark mode is on by default (toggle it in
+Settings).
 
 Tracks download **two at a time** by default (up to 4, see Settings), each
 with a live progress bar and transfer rate in the list, and failed tracks
