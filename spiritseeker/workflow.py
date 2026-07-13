@@ -16,7 +16,7 @@ from typing import Callable, Optional
 from . import tagger, verify
 from .config import Config
 from .soulseek import (Candidate, SoulseekError, SoulseekSession,
-                       build_queries, rank_candidates)
+                       build_queries, pick_listening_port, rank_candidates)
 from .spotify import Playlist, Track
 
 MAX_CANDIDATE_ATTEMPTS = 5
@@ -121,11 +121,19 @@ class Worker:
         if shared:
             self.notify("log", f"Sharing {len(shared)} folder(s) with the "
                         "network while downloading.")
+        preferred = int(self.config["listening_port"])
+        port, got_preferred = pick_listening_port(preferred)
+        if not got_preferred:
+            self.notify("log",
+                        f"Listening port {preferred} is in use (another "
+                        f"SpiritSeeker or Soulseek client?) - using {port} "
+                        "instead. If you rely on VPN port forwarding, close "
+                        "the other client so the forwarded port is free.")
         session = SoulseekSession(
             username=username,
             password=password,
             download_dir=tmp_dir,
-            listening_port=int(self.config["listening_port"]),
+            listening_port=port,
             shared_folders=shared,
             log=lambda msg: self.notify("log", msg),
         )

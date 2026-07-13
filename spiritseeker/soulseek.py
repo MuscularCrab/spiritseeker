@@ -11,8 +11,11 @@ import re
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
+import socket
+
 from aioslsk.client import SoulSeekClient
-from aioslsk.exceptions import AioSlskException, AuthenticationError
+from aioslsk.exceptions import (AioSlskException, AuthenticationError,
+                                ListeningConnectionFailedError)
 from aioslsk.protocol.primitives import AttributeKey
 from aioslsk.settings import (CredentialsSettings, Settings,
                               SharedDirectorySettingEntry)
@@ -32,6 +35,38 @@ SUSPECT_WORDS = ("remix", "live", "cover", "instrumental", "karaoke",
 
 class SoulseekError(Exception):
     pass
+
+
+def _ports_bindable(port: int) -> bool:
+    """Can we bind both the listening port and its obfuscated sibling?"""
+    for p in (port, port + 1):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            s.bind(("0.0.0.0", p))
+        except OSError:
+            return False
+        finally:
+            s.close()
+    return True
+
+
+def pick_listening_port(preferred: int) -> tuple[int, bool]:
+    """Return (usable_port, was_the_preferred_one).
+
+    The preferred port matters to users with VPN port forwarding, so it is
+    always tried first; nearby ports keep the app working when it's taken
+    (e.g. a second SpiritSeeker instance).
+    """
+    if _ports_bindable(preferred):
+        return preferred, True
+    for cand in range(preferred + 2, preferred + 42, 2):
+        if 1024 < cand < 65535 and _ports_bindable(cand):
+            return cand, False
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("0.0.0.0", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port, False
 
 
 @dataclass
@@ -171,6 +206,7 @@ class SoulseekSession:
                   for p in (shared_folders or []) if os.path.isdir(p)]
         settings.shares.directories = shares
         settings.shares.scan_on_start = bool(shares)
+        self.listening_port = listening_port
         settings.network.listening.port = listening_port
         settings.network.listening.obfuscated_port = listening_port + 1
         settings.network.server.reconnect.auto = True
@@ -185,6 +221,12 @@ class SoulseekSession:
             raise SoulseekError(
                 f"Soulseek login failed: {exc}. The username may be taken - "
                 "use 'New identity' in settings.") from exc
+        except ListeningConnectionFailedError as exc:
+            raise SoulseekError(
+                f"Could not open listening port {self.listening_port}. "
+                "It is probably in use - is another SpiritSeeker (or another "
+                "Soulseek client) already running? You can change the port "
+                "under Account & sharing.") from exc
         except (AioSlskException, OSError) as exc:
             raise SoulseekError(f"Could not connect to Soulseek: {exc}") from exc
         self._log("Connected to Soulseek")

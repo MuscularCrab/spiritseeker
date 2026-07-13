@@ -611,6 +611,24 @@ class AccountDialog(tk.Toplevel):
         ttk.Button(share_btns, text="Remove selected",
                    command=self._remove_folder).pack(side="left", padx=(6, 0))
 
+        # --- connection section ---
+        conn = ttk.LabelFrame(self, text="Connection")
+        conn.pack(fill="x", **pad)
+        row = ttk.Frame(conn)
+        row.pack(fill="x", padx=8, pady=(6, 2))
+        ttk.Label(row, text="Listening port:").pack(side="left")
+        self.port_var = tk.StringVar(value=str(config["listening_port"]))
+        ttk.Entry(row, textvariable=self.port_var,
+                  width=8).pack(side="left", padx=6)
+        ttk.Label(
+            conn, style="Subtle.TLabel", wraplength=420, justify="left",
+            text="Uses this port (and the next one up) for incoming peer "
+                 "connections. If your VPN forwards a port (e.g. PIA's port "
+                 "forwarding), enter that port here for the best "
+                 "connectivity. When the port is busy, SpiritSeeker "
+                 "automatically falls back to a nearby free one.",
+        ).pack(anchor="w", padx=8, pady=(0, 8))
+
         # --- buttons ---
         btns = ttk.Frame(self)
         btns.pack(fill="x", padx=10, pady=(0, 10))
@@ -643,7 +661,17 @@ class AccountDialog(tk.Toplevel):
                 APP_NAME, "Enter your Soulseek username and password, or "
                 "switch back to the rotating identity.", parent=self)
             return
+        try:
+            port = int(self.port_var.get().strip())
+            if not 1024 < port < 65534:
+                raise ValueError
+        except ValueError:
+            messagebox.showerror(
+                APP_NAME, "Listening port must be a number between 1025 "
+                "and 65533.", parent=self)
+            return
         cfg = self.config_obj
+        cfg["listening_port"] = port
         cfg["use_custom_login"] = use_custom
         cfg["custom_username"] = username
         cfg["custom_password"] = password

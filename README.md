@@ -115,7 +115,11 @@ eyeballing the file in [Spek](https://spek.cc), automated.
   regenerate anytime with *New identity*).
 - Config lives in `%APPDATA%\SpiritSeeker\config.json`.
 - Soulseek sharing works better with an open/UPnP-mapped listening port; the
-  app requests a UPnP mapping automatically (port 61000 by default).
+  app requests a UPnP mapping automatically (port 61000 by default). Using a
+  VPN with port forwarding (e.g. PIA)? Enter the forwarded port under
+  *Account & sharing... &rarr; Connection*. If the port is already taken
+  (say, by a second running copy of SpiritSeeker), the app logs a warning
+  and falls back to a nearby free port instead of failing.
 - Windows only (tested on Windows 10/11 and Server 2025). The Python code is
   cross-platform apart from packaging; PRs welcome.
 
