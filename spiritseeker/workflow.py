@@ -20,6 +20,16 @@ from .soulseek import (Candidate, SoulseekError, SoulseekSession,
 from .spotify import Playlist, Track
 
 MAX_CANDIDATE_ATTEMPTS = 5
+# Consecutive tracks with zero raw search results before we assume the
+# server is rate-limiting us and cool down
+EMPTY_STREAK_LIMIT = 3
+RATE_LIMIT_COOLDOWN_SEC = 240
+MAX_COOLDOWNS = 5
+
+
+class SearchRateLimited(Exception):
+    """Searches are coming back empty in a way that smells like server-side
+    rate limiting rather than genuinely unfindable tracks."""
 
 
 class Status(str, Enum):
@@ -81,6 +91,8 @@ class Worker:
         self._thread: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._main_task: Optional[asyncio.Task] = None
+        self._empty_streak = 0
+        self._cooldowns_used = 0
 
     def start(self):
         self._thread = threading.Thread(target=self._thread_main, daemon=True)
@@ -148,21 +160,8 @@ class Worker:
         ok = fail = 0
         try:
             for index, track in enumerate(self.playlist.tracks):
-                try:
-                    done = await asyncio.wait_for(
-                        self._process_track(session, index, track,
-                                            output_dir, tmp_dir),
-                        timeout=track_timeout)
-                except asyncio.CancelledError:
-                    raise
-                except TimeoutError:
-                    self.notify("track", index, Status.FAILED,
-                                f"gave up after {track_timeout // 60} min "
-                                "(not found or peers too slow)")
-                    done = False
-                except (SoulseekError, verify.VerificationError, OSError) as exc:
-                    self.notify("track", index, Status.FAILED, str(exc)[:120])
-                    done = False
+                done = await self._run_one(session, index, track,
+                                           output_dir, tmp_dir, track_timeout)
                 if done:
                     ok += 1
                 else:
@@ -172,6 +171,42 @@ class Worker:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
         self.notify("finished", ok, fail)
+
+    async def _run_one(self, session: SoulseekSession, index: int,
+                       track: Track, output_dir: str, tmp_dir: str,
+                       track_timeout: int, allow_cooldown: bool = True) -> bool:
+        try:
+            return await asyncio.wait_for(
+                self._process_track(session, index, track,
+                                    output_dir, tmp_dir),
+                timeout=track_timeout)
+        except asyncio.CancelledError:
+            raise
+        except SearchRateLimited:
+            if allow_cooldown and self._cooldowns_used < MAX_COOLDOWNS:
+                self._cooldowns_used += 1
+                minutes = RATE_LIMIT_COOLDOWN_SEC // 60
+                self.notify("log",
+                            f"{EMPTY_STREAK_LIMIT} searches in a row came "
+                            "back empty - the Soulseek server is likely "
+                            "rate-limiting us. Cooling down for "
+                            f"{minutes} minutes, then continuing...")
+                self.notify("track", index, Status.SEARCHING,
+                            f"cooling down {minutes} min (server rate limit)")
+                await asyncio.sleep(RATE_LIMIT_COOLDOWN_SEC)
+                return await self._run_one(session, index, track, output_dir,
+                                           tmp_dir, track_timeout,
+                                           allow_cooldown=False)
+            self.notify("track", index, Status.FAILED, "no sources found")
+            return False
+        except TimeoutError:
+            self.notify("track", index, Status.FAILED,
+                        f"gave up after {track_timeout // 60} min "
+                        "(not found or peers too slow)")
+            return False
+        except (SoulseekError, verify.VerificationError, OSError) as exc:
+            self.notify("track", index, Status.FAILED, str(exc)[:120])
+            return False
 
     async def _process_track(self, session: SoulseekSession, index: int,
                              track: Track, output_dir: str, tmp_dir: str) -> bool:
@@ -195,6 +230,16 @@ class Worker:
                 break
         else:
             ranked = rank_candidates(track, candidates, require_320=strict)
+
+        # Zero RAW results (not merely filtered out) for several tracks in a
+        # row means the server has stopped relaying our searches
+        if not candidates:
+            self._empty_streak += 1
+            if self._empty_streak >= EMPTY_STREAK_LIMIT:
+                self._empty_streak = 0
+                raise SearchRateLimited()
+        else:
+            self._empty_streak = 0
 
         if not ranked and strict:
             self.notify("track", index, Status.FAILED,

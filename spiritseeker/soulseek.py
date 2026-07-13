@@ -8,6 +8,8 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
@@ -31,6 +33,12 @@ ACCEPTED_EXTS = LOSSLESS_EXTS | {"mp3", "m4a", "ogg", "opus"}
 SUSPECT_WORDS = ("remix", "live", "cover", "instrumental", "karaoke",
                  "acoustic", "acapella", "slowed", "reverb", "nightcore",
                  "sped up", "8d audio", "edit)")
+
+# The Soulseek server silently drops searches from clients that fire too
+# many too quickly, which looks like every track suddenly having "no
+# sources". Stay well under the limit (other tools use ~34 per 220s).
+SEARCH_WINDOW_SEC = 220.0
+SEARCH_MAX_IN_WINDOW = 30
 
 
 class SoulseekError(Exception):
@@ -212,6 +220,8 @@ class SoulseekSession:
         settings.network.server.reconnect.auto = True
         settings.searches.receive.max_results = 150
         self.client = SoulSeekClient(settings)
+        self._search_times: deque[float] = deque()
+        self._warned_pacing = False
 
     async def start(self):
         try:
@@ -237,7 +247,26 @@ class SoulseekSession:
         except Exception:
             pass
 
+    async def _respect_search_rate_limit(self):
+        now = time.monotonic()
+        while self._search_times and now - self._search_times[0] > SEARCH_WINDOW_SEC:
+            self._search_times.popleft()
+        if len(self._search_times) >= SEARCH_MAX_IN_WINDOW:
+            wait = SEARCH_WINDOW_SEC - (now - self._search_times[0]) + 1.0
+            if not self._warned_pacing:
+                self._warned_pacing = True
+                self._log("Pacing searches to stay under Soulseek's rate "
+                          "limit - large playlists take a little longer but "
+                          "keep returning results.")
+            await asyncio.sleep(wait)
+            now = time.monotonic()
+            while (self._search_times
+                    and now - self._search_times[0] > SEARCH_WINDOW_SEC):
+                self._search_times.popleft()
+        self._search_times.append(time.monotonic())
+
     async def search(self, query: str, wait_sec: float = 9.0) -> list[Candidate]:
+        await self._respect_search_rate_limit()
         request = await self.client.searches.search(query)
         await asyncio.sleep(wait_sec)
 

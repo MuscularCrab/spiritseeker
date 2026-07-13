@@ -45,6 +45,12 @@ given up on after 8 minutes and marked failed, so a rare song never stalls
 the rest of the playlist. The timeout is configurable via `track_timeout_min`
 in the config file.
 
+Searches are paced (about 30 per 220 seconds) because the Soulseek server
+silently drops searches from clients that fire too many too fast — without
+this, long playlists suddenly report "no sources found" for everything. If
+the server rate-limits us anyway, SpiritSeeker notices the empty-result
+streak, cools down for a few minutes, and picks up where it left off.
+
 Right-click any track for the useful stuff: **Play**, **Open folder
 location**, **Copy file path**, **Copy "Artist - Title"**, and **Retry
 download** / **Download again**. Double-click plays the file. And yes,
