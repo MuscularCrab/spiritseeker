@@ -218,7 +218,7 @@ class App:
         table_frame.pack(fill="both", expand=True, **pad)
         columns = ("num", "title", "artist", "file", "status", "detail")
         self.tree = ttk.Treeview(table_frame, columns=columns, show="headings",
-                                 selectmode="browse")
+                                 selectmode="extended")
         for col, text, width, stretch in (
                 ("num", "#", 36, False),
                 ("title", "Title", 190, True),
@@ -513,16 +513,53 @@ class App:
         sel = self.tree.selection()
         return int(sel[0]) if sel else None
 
+    def _selected_indices(self) -> list[int]:
+        return [int(i) for i in self.tree.selection()]
+
+    def _row_status(self, index: int) -> str:
+        values = self.tree.item(str(index))["values"]
+        return str(values[4]) if len(values) > 4 else ""
+
     def _selected_file(self) -> str | None:
         index = self._selected_index()
         path = self.track_paths.get(index) if index is not None else None
         return path if path and os.path.exists(path) else None
 
+    def _skippable_now(self, index: int) -> bool:
+        status = self._row_status(index)
+        if status == Status.PENDING.value and index not in self.skip_requests:
+            return True
+        return self.worker is not None and status in (
+            Status.SEARCHING.value, Status.DOWNLOADING.value,
+            Status.VERIFYING.value, Status.TAGGING.value)
+
+    def _bulk_skip(self, indices: list[int]):
+        for index in indices:
+            status = self._row_status(index)
+            if status == Status.PENDING.value:
+                self._set_skip(index, True)
+            elif self.worker and status in (
+                    Status.SEARCHING.value, Status.DOWNLOADING.value,
+                    Status.VERIFYING.value, Status.TAGGING.value):
+                self._skip_active(index)
+
+    def _bulk_include(self, indices: list[int]):
+        for index in indices:
+            if index in self.skip_requests:
+                self._set_skip(index, False)
+
     def _show_context_menu(self, event):
         row = self.tree.identify_row(event.y)
         if not row:
             return
-        self.tree.selection_set(row)
+        # Right-clicking inside an existing multi-selection keeps it;
+        # right-clicking elsewhere selects just that row
+        if row not in self.tree.selection():
+            self.tree.selection_set(row)
+        selected = self._selected_indices()
+        if len(selected) > 1:
+            self._show_bulk_menu(event, selected)
+            return
         index = int(row)
         track = self.playlist.tracks[index]
         has_file = self._selected_file() is not None
@@ -571,6 +608,39 @@ class App:
             menu.tk_popup(event.x_root, event.y_root)
         finally:
             menu.grab_release()
+
+    def _show_bulk_menu(self, event, selected: list[int]):
+        skippable = [i for i in selected if self._skippable_now(i)]
+        includable = [i for i in selected if i in self.skip_requests]
+        with_files = [i for i in selected
+                      if self.track_paths.get(i)
+                      and os.path.exists(self.track_paths[i])]
+
+        menu = tk.Menu(self.tree, tearoff=0)
+        menu.add_command(
+            label=f"Skip download ({len(skippable)} tracks)",
+            command=lambda: self._bulk_skip(skippable),
+            state="normal" if skippable else "disabled")
+        menu.add_command(
+            label=f"Include in downloads ({len(includable)} tracks)",
+            command=lambda: self._bulk_include(includable),
+            state="normal" if includable else "disabled")
+        menu.add_separator()
+        menu.add_command(
+            label=f"Copy file paths ({len(with_files)})",
+            command=lambda: self._copy_paths(with_files),
+            state="normal" if with_files else "disabled")
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def _copy_paths(self, indices: list[int]):
+        paths = [self.track_paths[i] for i in indices
+                 if self.track_paths.get(i)]
+        if paths:
+            self.root.clipboard_clear()
+            self.root.clipboard_append("\n".join(paths))
 
     def _play_selected(self):
         path = self._selected_file()

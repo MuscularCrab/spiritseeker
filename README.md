@@ -61,8 +61,9 @@ location**, **Copy file path**, **Copy "Artist - Title"**, **Retry
 download** / **Download again**, and **Skip download** to leave songs out
 of a run — including tracks that are already searching or downloading;
 skipping one cancels its transfer and the rest of the run continues.
-Double-click plays the file. Dark mode is on by default (toggle it in
-Settings).
+Ctrl/Shift-click selects multiple tracks for bulk skip/include and bulk
+path copying. Double-click plays the file. Dark mode is on by default
+(toggle it in Settings).
 
 Tracks download **two at a time** by default (up to 4, see Settings), each
 with a live progress bar and transfer rate in the list, and failed tracks
