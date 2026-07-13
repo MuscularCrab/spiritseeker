@@ -16,8 +16,10 @@ from typing import Callable, Optional
 import socket
 
 from aioslsk.client import SoulSeekClient
+from aioslsk.events import ScanCompleteEvent
 from aioslsk.exceptions import (AioSlskException, AuthenticationError,
                                 ListeningConnectionFailedError)
+from aioslsk.shares.cache import SharesShelveCache
 from aioslsk.protocol.primitives import AttributeKey
 from aioslsk.settings import (CredentialsSettings, Settings,
                               SharedDirectorySettingEntry)
@@ -203,6 +205,7 @@ class SoulseekSession:
     def __init__(self, username: str, password: str, download_dir: str,
                  listening_port: int = 61000,
                  shared_folders: Optional[list[str]] = None,
+                 cache_dir: Optional[str] = None,
                  log: Optional[Callable[[str], None]] = None):
         os.makedirs(download_dir, exist_ok=True)
         self._log = log or (lambda msg: None)
@@ -210,16 +213,37 @@ class SoulseekSession:
             credentials=CredentialsSettings(username=username, password=password),
         )
         settings.shares.download = download_dir
-        shares = [SharedDirectorySettingEntry(path=p)
+        shares = [SharedDirectorySettingEntry(path=os.path.normpath(p))
                   for p in (shared_folders or []) if os.path.isdir(p)]
         settings.shares.directories = shares
         settings.shares.scan_on_start = bool(shares)
+        self._has_shares = bool(shares)
         self.listening_port = listening_port
         settings.network.listening.port = listening_port
         settings.network.listening.obfuscated_port = listening_port + 1
         settings.network.server.reconnect.auto = True
         settings.searches.receive.max_results = 150
-        self.client = SoulSeekClient(settings)
+        # Persist the share index so a large library only needs one full
+        # scan; on later starts the server learns the file count instantly
+        shares_cache = None
+        if shares and cache_dir:
+            os.makedirs(cache_dir, exist_ok=True)
+            shares_cache = SharesShelveCache(cache_dir)
+        self.client = SoulSeekClient(settings, shares_cache=shares_cache)
+
+        if shares:
+            async def _on_scan_complete(event: ScanCompleteEvent):
+                if event.file_count:
+                    self._log(f"Share scan complete: {event.file_count} "
+                              f"files in {event.folder_count} folders are "
+                              "now visible to other Soulseek users.")
+                else:
+                    self._log("Share scan finished but found 0 files - "
+                              "check that your shared folders exist and "
+                              "contain music.")
+            self._scan_handler = _on_scan_complete   # bus holds a weakref
+            self.client.events.register(ScanCompleteEvent, _on_scan_complete)
+
         self._search_times: deque[float] = deque()
         self._warned_pacing = False
         # Cumulative time spent sleeping for the search rate limit; lets the
@@ -243,6 +267,11 @@ class SoulseekSession:
         except (AioSlskException, OSError) as exc:
             raise SoulseekError(f"Could not connect to Soulseek: {exc}") from exc
         self._log("Connected to Soulseek")
+        if self._has_shares:
+            self._log("Scanning shared folders in the background - large "
+                      "libraries can take several minutes the first time; "
+                      "uploads become visible to others once the scan "
+                      "finishes (watch for 'Share scan complete').")
 
     async def stop(self):
         try:

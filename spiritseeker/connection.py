@@ -97,6 +97,7 @@ class ConnectionManager:
                 download_dir=incoming,
                 listening_port=port,
                 shared_folders=shared,
+                cache_dir=str(config_dir() / "shares-cache"),
                 log=lambda msg: self.notify("log", msg),
             )
             await session.start()

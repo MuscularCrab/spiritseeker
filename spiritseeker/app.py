@@ -1051,7 +1051,8 @@ class AccountDialog(tk.Toplevel):
         cfg["use_custom_login"] = use_custom
         cfg["custom_username"] = username
         cfg["custom_password"] = password
-        cfg["shared_folders"] = list(self.share_list.get(0, "end"))
+        cfg["shared_folders"] = [os.path.normpath(p) for p in
+                                 self.share_list.get(0, "end")]
         cfg.save()
         self.destroy()
         self.on_saved()
