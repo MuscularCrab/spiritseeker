@@ -500,7 +500,7 @@ class App:
         index = int(row)
         track = self.playlist.tracks[index]
         has_file = self._selected_file() is not None
-        status = str(self.tree.item(row)["values"][3])
+        status = str(self.tree.item(row)["values"][4])
         can_retry = self.worker is None and status in (
             Status.FAILED.value, Status.DONE.value, Status.SKIPPED.value)
 
