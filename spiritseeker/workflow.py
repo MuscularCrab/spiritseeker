@@ -344,10 +344,12 @@ class Worker:
 
             self.notify("track", index, Status.VERIFYING, cand.describe())
             try:
-                rep = await asyncio.to_thread(verify.verify_file, path, spectral)
-            except verify.VerificationError as exc:
+                rep = await asyncio.wait_for(
+                    asyncio.to_thread(verify.verify_file, path, spectral),
+                    timeout=300)
+            except (verify.VerificationError, TimeoutError) as exc:
                 self.notify("log", f"{track}: unreadable file from "
-                            f"{cand.username} ({exc})")
+                            f"{cand.username} ({exc or 'verification timed out'})")
                 self._discard(path)
                 continue
 
@@ -369,11 +371,16 @@ class Worker:
 
         # --- tag ---
         self.notify("track", index, Status.TAGGING, "MusicBrainz lookup...")
-        try:
+
+        async def _tag():
             tags = await asyncio.to_thread(tagger.lookup, track)
             cover = await asyncio.to_thread(tagger.fetch_cover_art,
                                             tags.release_mbid)
             await asyncio.to_thread(tagger.write_tags, local_path, tags, cover)
+            return tags
+
+        try:
+            tags = await asyncio.wait_for(_tag(), timeout=120)
             tag_note = f"tagged via {tags.source}"
         except Exception as exc:
             tag_note = f"tagging failed ({type(exc).__name__})"

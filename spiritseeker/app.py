@@ -167,6 +167,7 @@ class App:
 
         self._build_ui()
         self._apply_theme()
+        root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.after(100, self._poll_events)
 
     # ------------------------------------------------------------- UI setup
@@ -282,6 +283,31 @@ class App:
                                    command=self.open_chat)
         self.chat_btn.pack(side="right", padx=(0, 6))
         self.dark_var = tk.BooleanVar(value=self.config["dark_mode"])
+
+    # ------------------------------------------------------------- shutdown
+
+    def _on_close(self):
+        """Deterministic exit: background threads (connection loop, verify/
+        tag executor threads, wedged library internals) must never keep the
+        process alive after the window is gone."""
+        import os
+        try:
+            if self.worker:
+                self.worker.cancel()
+            future = self.conn.submit(self.conn.reset())
+            try:
+                future.result(timeout=3)   # best-effort clean disconnect
+            except Exception:
+                pass
+            if self.conn.loop:
+                self.conn.loop.call_soon_threadsafe(self.conn.loop.stop)
+        except Exception:
+            pass
+        try:
+            self.root.destroy()
+        except tk.TclError:
+            pass
+        os._exit(0)
 
     # ---------------------------------------------------------------- theme
 

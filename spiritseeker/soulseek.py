@@ -311,8 +311,14 @@ class SoulseekSession:
 
         Raises SoulseekError on failure/timeout; the partial file is removed.
         """
-        transfer = await self.client.transfers.download(
-            candidate.username, candidate.remote_path)
+        try:
+            transfer = await asyncio.wait_for(
+                self.client.transfers.download(
+                    candidate.username, candidate.remote_path),
+                timeout=30)
+        except TimeoutError as exc:
+            raise SoulseekError(
+                "Could not queue the transfer (peer unresponsive)") from exc
 
         stalled = 0.0
         queued = 0.0
@@ -363,8 +369,12 @@ class SoulseekSession:
                     if queued >= queue_timeout:
                         raise SoulseekError("Stuck in peer's queue")
         except (SoulseekError, asyncio.CancelledError):
+            # Aborting can itself hang on a wedged peer connection (seen in
+            # the wild: tracks frozen right after their queue/stall timeout
+            # fired) - never let cleanup outlive its own timeout
             try:
-                await self.client.transfers.abort(transfer)
+                await asyncio.wait_for(
+                    self.client.transfers.abort(transfer), timeout=10)
             except Exception:
                 pass
             raise
