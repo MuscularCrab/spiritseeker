@@ -62,7 +62,8 @@ download** / **Download again**, and **Skip download** to leave songs out
 of a run — including tracks that are already searching or downloading;
 skipping one cancels its transfer and the rest of the run continues.
 Ctrl/Shift-click selects multiple tracks for bulk skip/include and bulk
-path copying. Double-click plays the file. Dark mode is on by default
+path copying. Click any column header to sort by it (click again to
+reverse). Double-click plays the file. Dark mode is on by default
 (toggle it in Settings).
 
 Tracks download **two at a time** by default (up to 4, see Settings), each

@@ -216,17 +216,22 @@ class App:
         # --- track table ---
         table_frame = ttk.Frame(self.root)
         table_frame.pack(fill="both", expand=True, **pad)
-        columns = ("num", "title", "artist", "file", "status", "detail")
-        self.tree = ttk.Treeview(table_frame, columns=columns, show="headings",
-                                 selectmode="extended")
-        for col, text, width, stretch in (
-                ("num", "#", 36, False),
-                ("title", "Title", 190, True),
-                ("artist", "Artist", 140, True),
-                ("file", "Source file", 260, True),
-                ("status", "Status", 95, False),
-                ("detail", "Details", 300, True)):
-            self.tree.heading(col, text=text)
+        self.columns = ("num", "title", "artist", "file", "status", "detail")
+        self.headings = {"num": "#", "title": "Title", "artist": "Artist",
+                         "file": "Source file", "status": "Status",
+                         "detail": "Details"}
+        self._sort_state: tuple[str, bool] | None = None
+        self.tree = ttk.Treeview(table_frame, columns=self.columns,
+                                 show="headings", selectmode="extended")
+        for col, width, stretch in (
+                ("num", 36, False),
+                ("title", 190, True),
+                ("artist", 140, True),
+                ("file", 260, True),
+                ("status", 95, False),
+                ("detail", 300, True)):
+            self.tree.heading(col, text=self.headings[col],
+                              command=lambda c=col: self._sort_by(c))
             self.tree.column(col, width=width, stretch=stretch,
                              anchor="w" if col != "num" else "e")
         scroll = ttk.Scrollbar(table_frame, orient="vertical",
@@ -464,6 +469,8 @@ class App:
         self.playlist = playlist
         self.track_paths.clear()
         self.skip_requests.clear()
+        self._sort_state = None
+        self._render_headings()
         self.tree.delete(*self.tree.get_children())
         for i, track in enumerate(playlist.tracks):
             self.tree.insert("", "end", iid=str(i), values=(
@@ -524,6 +531,37 @@ class App:
         index = self._selected_index()
         path = self.track_paths.get(index) if index is not None else None
         return path if path and os.path.exists(path) else None
+
+    # ---------------------------------------------------------------- sorting
+
+    def _sort_by(self, col: str):
+        """Reorder the visible rows; row ids stay bound to their tracks, so
+        live status/progress updates keep landing on the right rows."""
+        if not self.playlist:
+            return
+        reverse = (self._sort_state is not None
+                   and self._sort_state[0] == col
+                   and not self._sort_state[1])
+        self._sort_state = (col, reverse)
+        col_idx = self.columns.index(col)
+
+        def key(iid):
+            value = self.tree.item(iid)["values"][col_idx]
+            if col == "num":
+                return int(value)
+            return str(value).lower()
+
+        for pos, iid in enumerate(sorted(self.tree.get_children(""),
+                                         key=key, reverse=reverse)):
+            self.tree.move(iid, "", pos)
+        self._render_headings()
+
+    def _render_headings(self):
+        for col in self.columns:
+            text = self.headings[col]
+            if self._sort_state and self._sort_state[0] == col:
+                text += " ▼" if self._sort_state[1] else " ▲"
+            self.tree.heading(col, text=text)
 
     def _skippable_now(self, index: int) -> bool:
         status = self._row_status(index)
