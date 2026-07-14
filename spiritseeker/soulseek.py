@@ -312,30 +312,49 @@ class SoulseekSession:
                 self._search_times.popleft()
         self._search_times.append(time.monotonic())
 
-    async def search(self, query: str, wait_sec: float = 9.0) -> list[Candidate]:
+    async def search(self, query: str, wait_sec: float = 9.0,
+                     enough_results: int = 400) -> list[Candidate]:
         await self._respect_search_rate_limit()
         request = await self.client.searches.search(query)
-        await asyncio.sleep(wait_sec)
+        try:
+            # Poll instead of one long sleep so we can cut off a flood early.
+            # A broad query ("the") otherwise pours in tens of thousands of
+            # peer replies that saturate the connection pool and cripple
+            # every later search until reconnect. Once we have plenty of
+            # results, remove the request so further replies are dropped.
+            waited = 0.0
+            step = 0.5
+            while waited < wait_sec:
+                await asyncio.sleep(step)
+                waited += step
+                items = sum(len(r.shared_items) for r in request.results)
+                if items >= enough_results:
+                    break
 
-        candidates: list[Candidate] = []
-        for result in request.results:
-            for item in result.shared_items:
-                attrs = {a.key: a.value for a in item.attributes}
-                ext = (item.extension or
-                       item.filename.rsplit(".", 1)[-1]).lower().strip(". ")
-                candidates.append(Candidate(
-                    username=result.username,
-                    remote_path=item.filename,
-                    filesize=item.filesize,
-                    extension=ext,
-                    bitrate=attrs.get(AttributeKey.BITRATE.value, 0),
-                    duration=attrs.get(AttributeKey.DURATION.value, 0),
-                    vbr=bool(attrs.get(AttributeKey.VBR.value, 0)),
-                    has_free_slots=result.has_free_slots,
-                    avg_speed=result.avg_speed,
-                    queue_size=result.queue_size,
-                ))
-        return candidates
+            candidates: list[Candidate] = []
+            for result in request.results:
+                for item in result.shared_items:
+                    attrs = {a.key: a.value for a in item.attributes}
+                    ext = (item.extension or
+                           item.filename.rsplit(".", 1)[-1]).lower().strip(". ")
+                    candidates.append(Candidate(
+                        username=result.username,
+                        remote_path=item.filename,
+                        filesize=item.filesize,
+                        extension=ext,
+                        bitrate=attrs.get(AttributeKey.BITRATE.value, 0),
+                        duration=attrs.get(AttributeKey.DURATION.value, 0),
+                        vbr=bool(attrs.get(AttributeKey.VBR.value, 0)),
+                        has_free_slots=result.has_free_slots,
+                        avg_speed=result.avg_speed,
+                        queue_size=result.queue_size,
+                    ))
+            return candidates
+        finally:
+            try:
+                self.client.searches.remove_request(request)
+            except Exception:
+                pass
 
     async def download(self, candidate: Candidate,
                        progress: Optional[Callable[[int, int, float], None]] = None,

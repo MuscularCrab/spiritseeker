@@ -269,7 +269,56 @@ class ConnectionManager:
                         dest_dir, f"{stem or e} ({n}){dot}{e if stem else ''}")
                     n += 1
                 shutil.move(path, dest)
+                # Auto-tag like the bulk downloader does, deriving the
+                # artist/title from the filename since there's no playlist row
+                dest = await self._tag_file(dest, remote_path)
                 self.notify("log", f"Downloaded {basename} -> {dest}")
             except Exception as exc:  # noqa: BLE001
                 self.notify("log", f"Download of {basename} failed: {exc}")
         self.submit(run())
+
+    async def _tag_file(self, path: str, remote_path: str) -> str:
+        """Tag a manually-downloaded file via MusicBrainz; best-effort.
+        Returns the final path (renamed to 'Artist - Title' when known)."""
+        import os
+        import shutil
+
+        from . import tagger
+        from .spotify import Track
+
+        artist, title = tagger.guess_artist_title(remote_path)
+        if not title:
+            return path
+        track = Track(title=title, artist=artist)
+        try:
+            tags = await asyncio.wait_for(self._run_tag(track, path),
+                                          timeout=120)
+        except Exception as exc:  # noqa: BLE001
+            self.notify("log", f"Tagging failed for {os.path.basename(path)} "
+                        f"({type(exc).__name__})")
+            return path
+        # Rename to a clean "Artist - Title.ext" when we learned the artist
+        final_artist = tags.artist or artist
+        final_title = tags.title or title
+        if final_artist and final_title:
+            from .workflow import sanitize_filename
+            ext = path.rsplit(".", 1)[-1].lower()
+            base = sanitize_filename(f"{final_artist} - {final_title}")
+            new = os.path.join(os.path.dirname(path), f"{base}.{ext}")
+            if new != path and not os.path.exists(new):
+                try:
+                    shutil.move(path, new)
+                    return new
+                except OSError:
+                    pass
+        return path
+
+    async def _run_tag(self, track, path):
+        from . import tagger
+        tags = await asyncio.to_thread(tagger.lookup, track)
+        cover = await asyncio.to_thread(tagger.fetch_cover_art,
+                                        tags.release_mbid)
+        await asyncio.to_thread(tagger.write_tags, path, tags, cover)
+        self.notify("log", f"Tagged via {tags.source}: "
+                    f"{tags.artist} - {tags.title}")
+        return tags

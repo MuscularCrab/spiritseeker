@@ -58,6 +58,32 @@ def _lucene_escape(text: str) -> str:
     return re.sub(r'([+\-!(){}\[\]^"~*?:\\/]|&&|\|\|)', r"\\\1", text)
 
 
+def guess_artist_title(remote_path: str) -> tuple[str, str]:
+    """Best-effort (artist, title) from a Soulseek path/filename.
+
+    Handles the two common shapes:
+      ...\\Artist\\Album\\03 - Title.flac   -> ("Artist", "Title")
+      Artist - Title.mp3                    -> ("Artist", "Title")
+    Returns ("", stem) when no artist can be inferred.
+    """
+    parts = re.split(r"[\\/]", remote_path)
+    fname = parts[-1] if parts else remote_path
+    stem = fname.rsplit(".", 1)[0]
+    # Drop a leading track number ("03 ", "03. ", "03 - ")
+    stem = re.sub(r"^\s*\d{1,3}\s*[-.\)]?\s*", "", stem).strip()
+
+    if " - " in stem:
+        artist, title = stem.split(" - ", 1)
+        return artist.strip(), title.strip()
+    # Fall back to the parent folders: .../Artist/Album/Title
+    if len(parts) >= 3:
+        artist = parts[-3].strip()
+        # Skip obvious non-artist roots like drive shares "@@..." or "Music"
+        if artist and not artist.startswith("@") and artist.lower() != "music":
+            return artist, stem
+    return "", stem
+
+
 def lookup(track: Track) -> TagData:
     """Find the best MusicBrainz match for a track; fall back to Spotify data."""
     fallback = TagData(title=track.title, artist=track.artist,

@@ -368,10 +368,11 @@ class SearchWindow(tk.Toplevel):
 
         frame = ttk.Frame(self)
         frame.pack(fill="both", expand=True, padx=8, pady=(4, 8))
-        cols = ("file", "size", "bitrate", "user")
+        cols = ("artist", "title", "file", "size", "bitrate", "user")
         self.tree = ttk.Treeview(frame, columns=cols, show="headings")
-        for c, text, w in (("file", "File", 380), ("size", "Size", 80),
-                           ("bitrate", "Quality", 90), ("user", "User", 140)):
+        for c, text, w in (("artist", "Artist", 130), ("title", "Title", 180),
+                           ("file", "File", 240), ("size", "Size", 70),
+                           ("bitrate", "Quality", 80), ("user", "User", 120)):
             self.tree.heading(c, text=text)
             self.tree.column(c, width=w,
                              anchor="e" if c == "size" else "w")
@@ -415,15 +416,35 @@ class SearchWindow(tk.Toplevel):
         if error:
             self.status_var.set(f"Search failed: {error}")
             return
-        ranked = sorted(candidates,
-                        key=lambda c: (c.is_lossless, c.bitrate,
-                                       c.has_free_slots), reverse=True)
+        from .tagger import guess_artist_title
+        import re as _re
+        terms = [t for t in _re.findall(r"[a-z0-9]+", query.lower())
+                 if len(t) > 1]
+
+        def relevance(c):
+            path = c.remote_path.lower()
+            base = c.basename.lower()
+            # How many query words appear, and how many are in the filename
+            # itself (stronger signal than a folder-name match)
+            in_path = sum(1 for t in terms if t in path)
+            in_name = sum(1 for t in terms if t in base)
+            all_terms = 1 if terms and in_path == len(terms) else 0
+            return (all_terms, in_name, in_path)
+
+        # Relevance first (so the song you searched surfaces to the top),
+        # then audio quality, then availability
+        ranked = sorted(
+            candidates,
+            key=lambda c: (relevance(c), c.is_lossless, c.bitrate,
+                           c.has_free_slots),
+            reverse=True)
         for c in ranked[:300]:
             quality = ("FLAC" if c.extension == "flac"
                        else (f"{c.bitrate}k" if c.bitrate else c.extension.upper()))
             mb = f"{c.filesize / (1024 * 1024):.1f}MB" if c.filesize else ""
+            artist, title = guess_artist_title(c.remote_path)
             item = self.tree.insert("", "end", values=(
-                c.basename, mb, quality, c.username))
+                artist, title, c.basename, mb, quality, c.username))
             self._results[item] = c
         self.status_var.set(
             f"{len(self._results)} results for '{query}'"
@@ -448,10 +469,13 @@ class SearchWindow(tk.Toplevel):
         if not c:
             return
         from .spotify import Track
-        # Strip extension for a clean title; the exact file is what we found
-        name = c.basename.rsplit(".", 1)[0]
-        self.app.enqueue_manual_track(Track(title=name, artist=""))
-        self.status_var.set(f"Added '{name}' to the main download queue.")
+        from .tagger import guess_artist_title
+        artist, title = guess_artist_title(c.remote_path)
+        if not title:
+            title = c.basename.rsplit(".", 1)[0]
+        self.app.enqueue_manual_track(Track(title=title, artist=artist))
+        label = f"{artist} - {title}" if artist else title
+        self.status_var.set(f"Added '{label}' to the main download queue.")
 
     def _browse_selected(self):
         c = self._selected_candidate()
