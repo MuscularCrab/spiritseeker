@@ -99,7 +99,27 @@ connection as your downloads:
   well-stocked sharer.
 
 The connection stays up in the background, so chat keeps working while
-playlists download and vice versa. SpiritSeeker connects and scans your
+playlists download and vice versa.
+
+## Uploads & sharing back
+
+Downloads and Uploads are separate tabs in the main window. The **Uploads**
+tab shows every file other people have taken from your shared folders —
+who took what, and its progress — and the list persists between sessions
+(with a **Clear list** button). Sharing back is good Soulseek etiquette and
+many peers prioritize users who share.
+
+## Friendly touches
+
+- A one-time **welcome** on first launch helps you pick a save folder and
+  (optionally) sign in / set up sharing.
+- A **connection status light** in the status bar (green = connected). Click
+  it any time for plain-English **connection help**.
+- If downloads or uploads keep failing to connect to peers, SpiritSeeker
+  explains **port forwarding** in plain language and points you to the
+  setting — this is the single biggest factor in Soulseek reliability.
+- Hover **tooltips** on the main controls, and clearer status wording
+  throughout. SpiritSeeker connects and scans your
 shared folders automatically on startup (disable in Settings).
 
 ## Quality rules

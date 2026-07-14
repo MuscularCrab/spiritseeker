@@ -12,7 +12,8 @@ from concurrent.futures import Future
 from typing import Callable, Optional
 
 from aioslsk.events import (PrivateMessageEvent, RoomJoinedEvent,
-                            RoomLeftEvent, RoomListEvent, RoomMessageEvent)
+                            RoomLeftEvent, RoomListEvent, RoomMessageEvent,
+                            TransferAddedEvent, TransferProgressEvent)
 
 from .config import Config, config_dir
 from .soulseek import SoulseekError, SoulseekSession, pick_listening_port
@@ -38,6 +39,9 @@ class ConnectionManager:
         self._session_key: Optional[tuple] = None
         self._lock: Optional[asyncio.Lock] = None
         self.loop: Optional[asyncio.AbstractEventLoop] = None
+        # Track consecutive peer-connection failures to spot a closed port
+        self._peer_conn_failures = 0
+        self._got_incoming = False
         started = threading.Event()
 
         def thread_main():
@@ -110,11 +114,17 @@ class ConnectionManager:
                 cache_dir=str(config_dir() / "shares-cache"),
                 log=lambda msg: self.notify("log", msg),
             )
-            await session.start()
+            self.notify("conn_status", "connecting")
+            try:
+                await session.start()
+            except Exception:
+                self.notify("conn_status", "offline")
+                raise
             self._register_chat_events(session)
             self.session = session
             self._session_key = key
             self.notify("chat_connected", username)
+            self.notify("conn_status", "connected")
             return session
 
     async def reset(self):
@@ -158,14 +168,39 @@ class ConnectionManager:
             if user is None or user.name == self.config.effective_credentials()[0]:
                 self.notify("room_left", room.name if room else "?")
 
+        def _upload_snapshot(transfer):
+            base = transfer.remote_path.replace("\\", "/").rsplit("/", 1)[-1]
+            state = getattr(transfer.state.VALUE, "name", "")
+            return {
+                "user": transfer.username,
+                "file": base,
+                "path": transfer.remote_path,
+                "size": int(transfer.filesize or 0),
+                "done": int(getattr(transfer, "bytes_transfered", 0) or 0),
+                "state": state,
+            }
+
+        async def on_transfer_added(event: TransferAddedEvent):
+            t = event.transfer
+            if t.is_upload():
+                self.notify("upload", _upload_snapshot(t))
+
+        async def on_transfer_progress(event: TransferProgressEvent):
+            for t, _prev, _cur in event.updates:
+                if t.is_upload():
+                    self.notify("upload", _upload_snapshot(t))
+
         # Hold references so the bus's weakrefs stay alive
         self._chat_handlers = (on_pm, on_room_msg, on_room_list,
-                               on_room_joined, on_room_left)
+                               on_room_joined, on_room_left,
+                               on_transfer_added, on_transfer_progress)
         events.register(PrivateMessageEvent, on_pm)
         events.register(RoomMessageEvent, on_room_msg)
         events.register(RoomListEvent, on_room_list)
         events.register(RoomJoinedEvent, on_room_joined)
         events.register(RoomLeftEvent, on_room_left)
+        events.register(TransferAddedEvent, on_transfer_added)
+        events.register(TransferProgressEvent, on_transfer_progress)
 
     # ---------------------------------------------------- chat actions
     # All of these are fire-and-forget from the GUI thread; errors are

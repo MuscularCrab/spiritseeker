@@ -164,6 +164,8 @@ class App:
         self.browse_windows: dict[str, object] = {}
         self.search_windows: dict[int, object] = {}
         self.search_token = 0
+        self.upload_history: list[dict] = []
+        self._load_upload_history()
         self._load_chat_history()
 
         root.title(f"{APP_NAME} v{__version__}")
@@ -173,10 +175,13 @@ class App:
         self._build_ui()
         self._apply_theme()
         root.protocol("WM_DELETE_WINDOW", self._on_close)
+        root.bind("<<OpenSettings>>", lambda e: self.open_settings_dialog())
         self.root.after(100, self._poll_events)
         if self.config["connect_on_startup"]:
             # Connect + scan shares in the background right away
             self.root.after(300, self.conn.connect_now)
+        if not self.config["welcomed"]:
+            self.root.after(400, self._show_welcome)
 
     # ------------------------------------------------------------- UI setup
 
@@ -205,10 +210,17 @@ class App:
         manual_entry = ttk.Entry(manual, textvariable=self.manual_var)
         manual_entry.pack(side="left", fill="x", expand=True, padx=6)
         manual_entry.bind("<Return>", lambda e: self.add_manual_song())
-        ttk.Button(manual, text="Add to queue",
-                   command=self.add_manual_song).pack(side="left")
-        ttk.Button(manual, text="Search files...",
-                   command=self.open_search).pack(side="left", padx=(6, 0))
+        add_btn = ttk.Button(manual, text="Add to queue",
+                             command=self.add_manual_song)
+        add_btn.pack(side="left")
+        search_btn = ttk.Button(manual, text="Search files...",
+                                command=self.open_search)
+        search_btn.pack(side="left", padx=(6, 0))
+        Tooltip(manual_entry, "Type a song as \"Artist - Title\" (or just a "
+                "title) and add it to the download queue. Works even while a "
+                "playlist is downloading.")
+        Tooltip(search_btn, "Search the whole Soulseek network by name and "
+                "browse what people are sharing, like Nicotine+.")
 
         # --- options row ---
         opts = ttk.Frame(self.root)
@@ -224,19 +236,30 @@ class App:
         opts2.pack(fill="x", **pad)
         self.allow_lower_var = tk.BooleanVar(
             value=self.config["allow_lower_quality"])
-        ttk.Checkbutton(
+        allow_cb = ttk.Checkbutton(
             opts2, variable=self.allow_lower_var,
-            text="Allow lower quality when no 320kbps+/lossless copy exists",
-        ).pack(side="left")
+            text="Allow lower quality when no 320kbps+/lossless copy exists")
+        allow_cb.pack(side="left")
         self.spectral_var = tk.BooleanVar(value=self.config["spectral_check"])
-        ttk.Checkbutton(
+        spectral_cb = ttk.Checkbutton(
             opts2, variable=self.spectral_var,
-            text="Spectral verification (detect fake 320s, like Spek)",
-        ).pack(side="left", padx=(16, 0))
+            text="Spectral verification (detect fake 320s, like Spek)")
+        spectral_cb.pack(side="left", padx=(16, 0))
+        Tooltip(allow_cb, "Off by default: only keep lossless (FLAC) or true "
+                "320kbps MP3s. Tick this to accept the best available copy "
+                "when nothing high-quality is shared.")
+        Tooltip(spectral_cb, "Analyzes each file's audio frequencies to catch "
+                "fakes - a low-quality MP3 re-saved as \"320kbps\". Like "
+                "checking the file in Spek, automatically.")
 
-        # --- track table ---
-        table_frame = ttk.Frame(self.root)
-        table_frame.pack(fill="both", expand=True, **pad)
+        # --- Downloads / Uploads tabs ---
+        self.tabs = ttk.Notebook(self.root)
+        self.tabs.pack(fill="both", expand=True, **pad)
+
+        dl_tab = ttk.Frame(self.tabs)
+        self.tabs.add(dl_tab, text="Downloads")
+        table_frame = ttk.Frame(dl_tab)
+        table_frame.pack(fill="both", expand=True)
         self.columns = ("num", "title", "artist", "file", "status", "detail")
         self.headings = {"num": "#", "title": "Title", "artist": "Artist",
                          "file": "Source file", "status": "Status",
@@ -262,6 +285,15 @@ class App:
         scroll.pack(side="right", fill="y")
         self.tree.bind("<Button-3>", self._show_context_menu)
         self.tree.bind("<Double-1>", lambda e: self._play_selected())
+        # Friendly empty-state overlay
+        self.empty_label = ttk.Label(
+            table_frame, style="Subtle.TLabel", justify="center",
+            text="Nothing here yet.\n\nPaste a Spotify playlist or song link "
+                 "up top, add a song by name,\nor use Search files... to find "
+                 "music on Soulseek.")
+        self._update_empty_state()
+
+        self._build_uploads_tab()
 
         # --- action row ---
         actions = ttk.Frame(self.root)
@@ -294,6 +326,18 @@ class App:
         # --- status bar ---
         bar = ttk.Frame(self.root)
         bar.pack(fill="x", padx=8, pady=(0, 6))
+        # Connection status light (a colored dot + word)
+        self.status_dot = tk.Canvas(bar, width=12, height=12,
+                                    highlightthickness=0)
+        self.status_dot.pack(side="left", padx=(0, 4))
+        self._dot = self.status_dot.create_oval(2, 2, 11, 11,
+                                                fill="#888888", outline="")
+        self.conn_status_var = tk.StringVar(value="Offline")
+        self.conn_status_lbl = ttk.Label(bar, textvariable=self.conn_status_var,
+                                         style="Subtle.TLabel", cursor="hand2")
+        self.conn_status_lbl.pack(side="left", padx=(0, 12))
+        self.conn_status_lbl.bind("<Button-1>",
+                                  lambda e: self.show_connection_help())
         self.identity_var = tk.StringVar()
         self._refresh_identity_label()
         ttk.Label(bar, textvariable=self.identity_var,
@@ -309,6 +353,181 @@ class App:
                                    command=self.open_chat)
         self.chat_btn.pack(side="right", padx=(0, 6))
         self.dark_var = tk.BooleanVar(value=self.config["dark_mode"])
+        Tooltip(self.conn_status_lbl, "Your Soulseek connection status. "
+                "Click for connection & port-forwarding help.")
+        Tooltip(self.chat_btn, "Private messages, chat rooms, and browsing "
+                "other users' shared files.")
+
+    # ------------------------------------------------------------- uploads
+
+    def _build_uploads_tab(self):
+        ul_tab = ttk.Frame(self.tabs)
+        self.tabs.add(ul_tab, text="Uploads")
+        frame = ttk.Frame(ul_tab)
+        frame.pack(fill="both", expand=True)
+        cols = ("user", "file", "size", "progress", "status")
+        self.up_tree = ttk.Treeview(frame, columns=cols, show="headings",
+                                    selectmode="extended")
+        for c, text, w, anchor in (
+                ("user", "Downloaded by", 150, "w"),
+                ("file", "File", 300, "w"),
+                ("size", "Size", 80, "e"),
+                ("progress", "Progress", 150, "w"),
+                ("status", "Status", 110, "w")):
+            self.up_tree.heading(c, text=text)
+            self.up_tree.column(c, width=w, anchor=anchor)
+        up_scroll = ttk.Scrollbar(frame, orient="vertical",
+                                  command=self.up_tree.yview)
+        self.up_tree.configure(yscrollcommand=up_scroll.set)
+        self.up_tree.pack(side="left", fill="both", expand=True)
+        up_scroll.pack(side="right", fill="y")
+
+        row = ttk.Frame(ul_tab)
+        row.pack(fill="x", pady=(6, 0))
+        self.up_summary_var = tk.StringVar()
+        ttk.Label(row, textvariable=self.up_summary_var,
+                  style="Subtle.TLabel").pack(side="left")
+        ttk.Button(row, text="Clear list",
+                   command=self.clear_uploads).pack(side="right")
+        # key -> tree iid, for in-place progress updates
+        self._upload_rows: dict[str, str] = {}
+        self._render_uploads()
+
+    def _upload_key(self, rec: dict) -> str:
+        return f"{rec['user']}\x00{rec.get('path', rec['file'])}"
+
+    def _render_uploads(self):
+        self.up_tree.delete(*self.up_tree.get_children())
+        self._upload_rows.clear()
+        for rec in self.upload_history:
+            self._insert_upload_row(rec)
+        self._update_upload_summary()
+
+    def _insert_upload_row(self, rec: dict):
+        size = rec.get("size", 0)
+        done = rec.get("done", 0)
+        pct = min(done * 100 // size, 100) if size else 0
+        blocks = pct // 10
+        bar = "█" * blocks + "░" * (10 - blocks)
+        size_s = f"{size / (1024 * 1024):.1f}MB" if size else ""
+        state = self._friendly_upload_state(rec.get("state", ""))
+        iid = self._upload_rows.get(self._upload_key(rec))
+        values = (rec["user"], rec["file"], size_s, f"{bar} {pct}%", state)
+        if iid and self.up_tree.exists(iid):
+            self.up_tree.item(iid, values=values)
+        else:
+            iid = self.up_tree.insert("", "end", values=values)
+            self._upload_rows[self._upload_key(rec)] = iid
+
+    @staticmethod
+    def _friendly_upload_state(state: str) -> str:
+        return {
+            "COMPLETE": "Sent ✓",
+            "UPLOADING": "Uploading",
+            "QUEUED": "Queued",
+            "INITIALIZING": "Starting",
+            "FAILED": "Failed",
+            "ABORTED": "Cancelled",
+        }.get(state, state.title() or "Queued")
+
+    def _update_upload_summary(self):
+        n = len(self.upload_history)
+        done = sum(1 for r in self.upload_history
+                   if r.get("state") == "COMPLETE")
+        if n == 0:
+            self.up_summary_var.set(
+                "No uploads yet. When you share folders (Account & "
+                "sharing...), songs other people take from you appear here.")
+        else:
+            self.up_summary_var.set(
+                f"{n} upload(s), {done} completed")
+
+    def _handle_upload_event(self, rec: dict):
+        key = self._upload_key(rec)
+        for existing in self.upload_history:
+            if self._upload_key(existing) == key:
+                existing.update(rec)
+                self._insert_upload_row(existing)
+                self._update_upload_summary()
+                self._save_upload_history()
+                return
+        self.upload_history.append(rec)
+        self._insert_upload_row(rec)
+        self._update_upload_summary()
+        self._save_upload_history()
+
+    def clear_uploads(self):
+        if not self.upload_history:
+            return
+        self.upload_history.clear()
+        self._render_uploads()
+        self._save_upload_history()
+        self.log("Cleared the uploads list.")
+
+    def _uploads_path(self):
+        from .config import config_dir
+        return config_dir() / "uploads.json"
+
+    def _load_upload_history(self):
+        import json
+        try:
+            with open(self._uploads_path(), "r", encoding="utf-8") as f:
+                self.upload_history = json.load(f)
+        except (OSError, ValueError):
+            self.upload_history = []
+
+    def _save_upload_history(self):
+        import json
+        try:
+            with open(self._uploads_path(), "w", encoding="utf-8") as f:
+                json.dump(self.upload_history[-1000:], f)
+        except OSError:
+            pass
+
+    def _update_empty_state(self):
+        has_rows = bool(self.tree.get_children(""))
+        if has_rows:
+            self.empty_label.place_forget()
+        else:
+            self.empty_label.place(relx=0.5, rely=0.4, anchor="center")
+
+    # -------------------------------------------------- connection status
+
+    def _set_conn_status(self, status: str):
+        colors = {"connected": "#1a8a2a", "connecting": "#b58900",
+                  "offline": "#888888"}
+        labels = {"connected": "Connected", "connecting": "Connecting...",
+                  "offline": "Offline"}
+        self.status_dot.itemconfigure(
+            self._dot, fill=colors.get(status, "#888888"))
+        self.conn_status_var.set(labels.get(status, status.title()))
+
+    def _on_connectivity_warning(self, failures: int):
+        self.log(f"Heads up: {failures} transfers couldn't connect to peers. "
+                 "This is usually a closed listening port.")
+        if not self.config["hide_port_help"]:
+            self.show_connection_help(auto=True)
+
+    def show_connection_help(self, auto=False):
+        ConnectionHelpDialog(self.root, self.config, port=self._active_port())
+
+    def _show_welcome(self):
+        def pick():
+            folder = filedialog.askdirectory(
+                initialdir=self.dir_var.get() or None)
+            if folder:
+                self.dir_var.set(folder)
+                self.config["output_dir"] = folder
+                self.config.save()
+            return folder
+        WelcomeDialog(self.root, self.config, on_pick_folder=pick,
+                      on_open_account=self.open_account_dialog)
+
+    def _active_port(self) -> int:
+        sess = getattr(self.conn, "session", None)
+        if sess is not None:
+            return getattr(sess, "listening_port", self.config["listening_port"])
+        return int(self.config["listening_port"])
 
     # ----------------------------------------------------- chat persistence
 
@@ -507,6 +726,7 @@ class App:
             Status.PENDING.value, ""), tags=(Status.PENDING.name,))
         self.progress.configure(maximum=max(len(self.playlist.tracks), 1))
         self.tree.see(str(index))
+        self._update_empty_state()
         if self.worker and self.worker_index_map is None:
             # Live-append to the running full-playlist worker
             self.worker.add_track(index, track)
@@ -576,6 +796,7 @@ class App:
             f"{playlist.name} - {len(playlist.tracks)} tracks")
         self.start_btn.configure(state="normal")
         self.progress.configure(value=0, maximum=max(len(playlist.tracks), 1))
+        self._update_empty_state()
         self.log(f"Loaded '{playlist.name}' ({len(playlist.tracks)} tracks)")
         if playlist.maybe_truncated:
             self.log("Note: Spotify's public page only exposes the first 100 "
@@ -974,6 +1195,12 @@ class App:
             self._save_chat_history()
             if self.chat_window and self.chat_window.winfo_exists():
                 self.chat_window.refresh_rooms()
+        elif kind == "conn_status":
+            self._set_conn_status(event[1])
+        elif kind == "connectivity_warning":
+            self._on_connectivity_warning(event[1])
+        elif kind == "upload":
+            self._handle_upload_event(event[1])
         elif kind == "browse_result":
             _, username, dirs, error = event
             win = self.browse_windows.get(username)
@@ -1289,6 +1516,162 @@ class AccountDialog(tk.Toplevel):
         cfg.save()
         self.destroy()
         self.on_saved()
+
+
+class Tooltip:
+    """Lightweight hover tooltip for any widget."""
+
+    def __init__(self, widget, text: str):
+        self.widget = widget
+        self.text = text
+        self.tip = None
+        widget.bind("<Enter>", self._show, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<ButtonPress>", self._hide, add="+")
+
+    def _show(self, _event=None):
+        if self.tip or not self.text:
+            return
+        x = self.widget.winfo_rootx() + 12
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 4
+        self.tip = tw = tk.Toplevel(self.widget)
+        tw.wm_overrideredirect(True)
+        tw.wm_geometry(f"+{x}+{y}")
+        tk.Label(tw, text=self.text, justify="left", background="#ffffe0",
+                 foreground="#000000", relief="solid", borderwidth=1,
+                 wraplength=320, font=("Segoe UI", 9),
+                 padx=6, pady=4).pack()
+
+    def _hide(self, _event=None):
+        if self.tip:
+            self.tip.destroy()
+            self.tip = None
+
+
+class ConnectionHelpDialog(tk.Toplevel):
+    """Plain-English explanation of why transfers fail and how port
+    forwarding fixes it."""
+
+    def __init__(self, parent, config, port: int):
+        super().__init__(parent)
+        self.config_obj = config
+        self.title("Connection help")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+        p = palette(bool(config["dark_mode"]))
+        self.configure(bg=p["bg"])
+        set_titlebar_dark(self, bool(config["dark_mode"]))
+
+        body = (
+            "Having trouble downloading or uploading?\n\n"
+            "Soulseek works best when other people's computers can reach "
+            "yours directly. For that, one network port needs to be open — "
+            "otherwise you can often still download from generous peers, but "
+            "many transfers will stall in a queue and uploads may never "
+            "start.\n\n"
+            f"SpiritSeeker is currently listening on port {port}.\n\n"
+            "How to open it:\n"
+            "•  Easiest: use a VPN with port forwarding (for example PIA). "
+            "Turn on port forwarding, then copy the port it gives you into "
+            "Settings → Connection.\n"
+            "•  Or: forward the port to this PC in your home router's "
+            "settings (search your router model + \"port forwarding\").\n\n"
+            "After setting a forwarded port, enter it under Settings → "
+            "Connection so SpiritSeeker uses it. Many downloads still work "
+            "without this — it mainly improves reliability and lets you "
+            "share back."
+        )
+        ttk.Label(self, text=body, justify="left", wraplength=460,
+                  style="Subtle.TLabel").pack(padx=14, pady=(14, 8),
+                                              anchor="w")
+
+        btns = ttk.Frame(self)
+        btns.pack(fill="x", padx=14, pady=(0, 12))
+        ttk.Button(btns, text="Open Settings", command=self._open_settings
+                   ).pack(side="left")
+        self.hide_var = tk.BooleanVar(value=bool(config["hide_port_help"]))
+        ttk.Checkbutton(btns, text="Don't show this automatically",
+                        variable=self.hide_var,
+                        command=self._toggle_hide).pack(side="left", padx=(10, 0))
+        ttk.Button(btns, text="Close", command=self.destroy).pack(side="right")
+
+    def _toggle_hide(self):
+        self.config_obj["hide_port_help"] = bool(self.hide_var.get())
+        self.config_obj.save()
+
+    def _open_settings(self):
+        self.destroy()
+        # The parent App wires this up
+        self.master.event_generate("<<OpenSettings>>")
+
+
+class WelcomeDialog(tk.Toplevel):
+    """One-time friendly first-run intro."""
+
+    def __init__(self, parent, config, on_pick_folder, on_open_account):
+        super().__init__(parent)
+        self.config_obj = config
+        self.on_pick_folder = on_pick_folder
+        self.on_open_account = on_open_account
+        self.title("Welcome to SpiritSeeker")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+        p = palette(bool(config["dark_mode"]))
+        self.configure(bg=p["bg"])
+        set_titlebar_dark(self, bool(config["dark_mode"]))
+
+        ttk.Label(self, text="Welcome to SpiritSeeker \U0001F3B5",
+                  font=("Segoe UI", 14, "bold")).pack(
+            padx=16, pady=(16, 4), anchor="w")
+        intro = (
+            "SpiritSeeker turns a Spotify playlist (or any song you name) "
+            "into real music files, downloaded from the Soulseek network and "
+            "automatically tagged with track info and album art.\n\n"
+            "A few quick things to get you started:")
+        ttk.Label(self, text=intro, justify="left", wraplength=440,
+                  style="Subtle.TLabel").pack(padx=16, anchor="w")
+
+        steps = ttk.Frame(self)
+        steps.pack(fill="x", padx=16, pady=10)
+        ttk.Label(steps, text="1.  Choose where to save your music:").grid(
+            row=0, column=0, sticky="w", pady=3)
+        ttk.Button(steps, text="Pick folder...",
+                   command=self._pick).grid(row=0, column=1, padx=8)
+        self.folder_var = tk.StringVar(value=config["output_dir"])
+        ttk.Label(steps, textvariable=self.folder_var, style="Subtle.TLabel",
+                  wraplength=420).grid(row=1, column=0, columnspan=2,
+                                       sticky="w")
+        ttk.Label(steps, text="2.  Optional: sign in / share folders "
+                  "(improves reliability):").grid(
+            row=2, column=0, sticky="w", pady=(10, 3))
+        ttk.Button(steps, text="Account & sharing...",
+                   command=self._account).grid(row=2, column=1, padx=8)
+
+        note = (
+            "SpiritSeeker downloads files shared by other people on Soulseek. "
+            "Please only download music you're entitled to. Enjoy!")
+        ttk.Label(self, text=note, justify="left", wraplength=440,
+                  style="Subtle.TLabel").pack(padx=16, pady=(4, 8), anchor="w")
+
+        btns = ttk.Frame(self)
+        btns.pack(fill="x", padx=16, pady=(0, 14))
+        ttk.Button(btns, text="Get started",
+                   command=self._finish).pack(side="right")
+
+    def _pick(self):
+        folder = self.on_pick_folder()
+        if folder:
+            self.folder_var.set(folder)
+
+    def _account(self):
+        self.on_open_account()
+
+    def _finish(self):
+        self.config_obj["welcomed"] = True
+        self.config_obj.save()
+        self.destroy()
 
 
 def _icon_path() -> str | None:

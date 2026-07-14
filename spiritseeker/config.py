@@ -59,6 +59,10 @@ DEFAULTS = {
     "notify_on_finish": True,
     # Connect to Soulseek (and start the share scan) as soon as the app opens
     "connect_on_startup": True,
+    # Has the first-run welcome been shown?
+    "welcomed": False,
+    # Suppress the automatic port-forwarding help popup after the user dismisses it
+    "hide_port_help": False,
     "dark_mode": True,
 }
 

@@ -109,6 +109,10 @@ class Worker:
         self._extra_tasks: list[asyncio.Task] = []
         self._attempt = None            # set while a run is active
         self._accepting = False
+        # Connectivity signal: peers we couldn't connect to / that couldn't
+        # reach us. A high count with no successes usually means a closed port.
+        self._conn_failures = 0
+        self._downloads_ok = 0
 
     def start(self):
         self._future = self.manager.submit(self._runner())
@@ -226,6 +230,11 @@ class Worker:
             self._attempt = None
             # The session stays connected for chat and the next run
             shutil.rmtree(tmp_dir, ignore_errors=True)
+
+        # If lots of transfers failed to connect and none succeeded, the
+        # listening port is probably closed - let the GUI offer help.
+        if self._downloads_ok == 0 and self._conn_failures >= 4:
+            self.notify("connectivity_warning", self._conn_failures)
 
         self.notify("finished", ok, fail)
 
@@ -363,8 +372,12 @@ class Worker:
                     stall_timeout=stall_timeout,
                     on_wait=waiting)
             except SoulseekError as exc:
-                if "queue" in str(exc).lower():
+                msg = str(exc).lower()
+                if "queue" in msg:
                     stuck_users.add(cand.username)
+                if any(w in msg for w in ("queue", "unresponsive", "connect",
+                                          "timed out", "stalled")):
+                    self._conn_failures += 1
                 self.notify("log", f"{track}: {cand.username} failed ({exc})")
                 continue
 
@@ -387,6 +400,7 @@ class Worker:
                 continue
 
             local_path, report = path, rep
+            self._downloads_ok += 1
             break
 
         if local_path is None:
