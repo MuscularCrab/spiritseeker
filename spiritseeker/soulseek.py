@@ -27,6 +27,43 @@ from aioslsk.transfer.state import TransferState
 
 from .spotify import Track
 
+
+def _patch_cross_drive_shares():
+    """aioslsk's SharedDirectory.is_parent_of/is_child_of call
+    os.path.commonpath, which raises ValueError ("Paths don't have the same
+    drive") when a shared folder is on a different drive/mount than the
+    download dir - e.g. a UNC network share (\\\\host\\music) or a second
+    drive letter. Two paths on different drives are never parent/child, so
+    the correct answer is simply False. Wrap the methods to return that
+    instead of crashing the whole connection.
+    """
+    from aioslsk.shares.model import SharedDirectory
+
+    if getattr(SharedDirectory, "_spiritseeker_patched", False):
+        return
+
+    orig_parent = SharedDirectory.is_parent_of
+    orig_child = SharedDirectory.is_child_of
+
+    def is_parent_of(self, directory):
+        try:
+            return orig_parent(self, directory)
+        except ValueError:
+            return False
+
+    def is_child_of(self, directory):
+        try:
+            return orig_child(self, directory)
+        except ValueError:
+            return False
+
+    SharedDirectory.is_parent_of = is_parent_of
+    SharedDirectory.is_child_of = is_child_of
+    SharedDirectory._spiritseeker_patched = True
+
+
+_patch_cross_drive_shares()
+
 LOSSLESS_EXTS = {"flac", "wav", "ape", "aiff"}
 ACCEPTED_EXTS = LOSSLESS_EXTS | {"mp3", "m4a", "ogg", "opus"}
 
