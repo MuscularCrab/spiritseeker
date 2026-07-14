@@ -57,6 +57,8 @@ DEFAULTS = {
     "overwrite_duplicates": False,
     # Toast + sound when a run completes
     "notify_on_finish": True,
+    # Connect to Soulseek (and start the share scan) as soon as the app opens
+    "connect_on_startup": True,
     "dark_mode": True,
 }
 

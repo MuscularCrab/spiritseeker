@@ -117,6 +117,7 @@ class ChatWindow(tk.Toplevel):
         me = self.app.config.effective_credentials()[0]
         self.app.pm_history.setdefault(user, []).append(
             (_stamp(), me, text))
+        self.app._save_chat_history()
         self.pm_msg_var.set("")
         self.refresh_pms(select=user)
 
@@ -284,11 +285,17 @@ class BrowseWindow(tk.Toplevel):
         self.tree.bind("<Double-1>", self._download_selected)
 
         self._files: dict[str, tuple[str, int]] = {}   # item id -> (path, size)
-        app.conn.browse_user(username, self._on_result)
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        app.browse_windows[username] = self
+        app.conn.browse_user(username)
 
-    def _on_result(self, dirs, error):
-        # Called from the connection thread; hop to the GUI thread
-        self.after(0, lambda: self._populate(dirs, error))
+    def _on_close(self):
+        self.app.browse_windows.pop(self.username, None)
+        self.destroy()
+
+    def deliver(self, dirs, error):
+        """Called by App on the GUI thread when browse_result arrives."""
+        self._populate(dirs, error)
 
     def _populate(self, dirs, error):
         if error:
@@ -302,13 +309,14 @@ class BrowseWindow(tk.Toplevel):
                 continue
             node = self.tree.insert("", "end", text=dir_name, open=False)
             for f in files:
-                fname = getattr(f, "filename", "")
+                # filename is the FULL remote path the peer serves
+                remote_path = getattr(f, "filename", "")
+                display = remote_path.replace("/", "\\").rsplit("\\", 1)[-1]
                 fsize = int(getattr(f, "filesize", 0))
                 mb = f"{fsize / (1024 * 1024):.1f}MB" if fsize else ""
-                item = self.tree.insert(node, "end", text=fname,
+                item = self.tree.insert(node, "end", text=display,
                                         values=(mb,))
-                self._files[item] = (dir_name.rstrip("\\") + "\\" + fname,
-                                     fsize)
+                self._files[item] = (remote_path, fsize)
                 total += 1
         self.status_var.set(
             f"{total} files in {len(self.tree.get_children())} folders - "
@@ -324,3 +332,128 @@ class BrowseWindow(tk.Toplevel):
                                            size, dest)
         self.status_var.set(f"Queued: {remote_path.rsplit(chr(92), 1)[-1]} "
                             "(watch the main window log)")
+
+
+class SearchWindow(tk.Toplevel):
+    """Nicotine+-style free-form file search across the whole network."""
+
+    def __init__(self, app: "App"):
+        super().__init__(app.root)
+        self.app = app
+        self.title("Search Soulseek")
+        self.geometry("860x520")
+        self.minsize(620, 400)
+        from .app import palette, set_titlebar_dark
+        p = palette(bool(app.config["dark_mode"]))
+        self.p = p
+        self.configure(bg=p["bg"])
+        set_titlebar_dark(self, bool(app.config["dark_mode"]))
+        self._token = 0
+        self._results: dict[str, object] = {}   # tree item -> Candidate
+
+        top = ttk.Frame(self)
+        top.pack(fill="x", padx=8, pady=8)
+        ttk.Label(top, text="Search:").pack(side="left")
+        self.query_var = tk.StringVar()
+        entry = ttk.Entry(top, textvariable=self.query_var)
+        entry.pack(side="left", fill="x", expand=True, padx=6)
+        entry.bind("<Return>", lambda e: self.do_search())
+        entry.focus_set()
+        ttk.Button(top, text="Search", command=self.do_search).pack(side="left")
+
+        self.status_var = tk.StringVar(value="Type a song or artist and hit "
+                                       "Search.")
+        ttk.Label(self, textvariable=self.status_var,
+                  style="Subtle.TLabel").pack(anchor="w", padx=8)
+
+        frame = ttk.Frame(self)
+        frame.pack(fill="both", expand=True, padx=8, pady=(4, 8))
+        cols = ("file", "size", "bitrate", "user")
+        self.tree = ttk.Treeview(frame, columns=cols, show="headings")
+        for c, text, w in (("file", "File", 380), ("size", "Size", 80),
+                           ("bitrate", "Quality", 90), ("user", "User", 140)):
+            self.tree.heading(c, text=text)
+            self.tree.column(c, width=w,
+                             anchor="e" if c == "size" else "w")
+        sb = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=sb.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+        self.tree.bind("<Double-1>", lambda e: self._download_selected())
+
+        btns = ttk.Frame(self)
+        btns.pack(fill="x", padx=8, pady=(0, 8))
+        ttk.Button(btns, text="Download selected",
+                   command=self._download_selected).pack(side="left")
+        ttk.Button(btns, text="Browse this user's files",
+                   command=self._browse_selected).pack(side="left", padx=(6, 0))
+        ttk.Button(btns, text="Add to download queue",
+                   command=self._queue_selected).pack(side="left", padx=(6, 0))
+
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        app.search_windows[id(self)] = self
+
+    def _on_close(self):
+        self.app.search_windows.pop(id(self), None)
+        self.destroy()
+
+    def do_search(self):
+        query = self.query_var.get().strip()
+        if not query:
+            return
+        self.tree.delete(*self.tree.get_children())
+        self._results.clear()
+        self.app.search_token += 1
+        self._token = self.app.search_token
+        self.status_var.set(f"Searching for '{query}'...")
+        self.app.conn.search_files(query, self._token)
+
+    def deliver(self, token, query, candidates, error):
+        """Called by App on the GUI thread when search_result arrives."""
+        if token != self._token:
+            return
+        if error:
+            self.status_var.set(f"Search failed: {error}")
+            return
+        ranked = sorted(candidates,
+                        key=lambda c: (c.is_lossless, c.bitrate,
+                                       c.has_free_slots), reverse=True)
+        for c in ranked[:300]:
+            quality = ("FLAC" if c.extension == "flac"
+                       else (f"{c.bitrate}k" if c.bitrate else c.extension.upper()))
+            mb = f"{c.filesize / (1024 * 1024):.1f}MB" if c.filesize else ""
+            item = self.tree.insert("", "end", values=(
+                c.basename, mb, quality, c.username))
+            self._results[item] = c
+        self.status_var.set(
+            f"{len(self._results)} results for '{query}'"
+            + ("" if self._results else " - nothing found, try different words"))
+
+    def _selected_candidate(self):
+        sel = self.tree.selection()
+        return self._results.get(sel[0]) if sel else None
+
+    def _download_selected(self):
+        c = self._selected_candidate()
+        if not c:
+            return
+        dest = self.app.dir_var.get().strip() or self.app.config["output_dir"]
+        self.app.conn.download_remote_file(c.username, c.remote_path,
+                                           c.filesize, dest)
+        self.status_var.set(f"Downloading {c.basename} to your save folder "
+                            "(watch the main window log)")
+
+    def _queue_selected(self):
+        c = self._selected_candidate()
+        if not c:
+            return
+        from .spotify import Track
+        # Strip extension for a clean title; the exact file is what we found
+        name = c.basename.rsplit(".", 1)[0]
+        self.app.enqueue_manual_track(Track(title=name, artist=""))
+        self.status_var.set(f"Added '{name}' to the main download queue.")
+
+    def _browse_selected(self):
+        c = self._selected_candidate()
+        if c:
+            BrowseWindow(self.app, c.username)

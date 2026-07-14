@@ -11,7 +11,8 @@ from tkinter import filedialog, messagebox, ttk
 from . import APP_NAME, __version__
 from .config import Config
 from .connection import ConnectionManager
-from .spotify import Playlist, SpotifyError, fetch_playlist, import_csv
+from .spotify import (Playlist, SpotifyError, Track, fetch_playlist,
+                      import_csv)
 from .workflow import Status, Worker
 
 STATUS_COLORS = {
@@ -160,6 +161,10 @@ class App:
         self.room_history: dict[str, list[tuple[str, str, str]]] = {}
         self.joined_rooms: set[str] = set()
         self.unread_chats = 0
+        self.browse_windows: dict[str, object] = {}
+        self.search_windows: dict[int, object] = {}
+        self.search_token = 0
+        self._load_chat_history()
 
         root.title(f"{APP_NAME} v{__version__}")
         root.geometry("980x680")
@@ -169,6 +174,9 @@ class App:
         self._apply_theme()
         root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.after(100, self._poll_events)
+        if self.config["connect_on_startup"]:
+            # Connect + scan shares in the background right away
+            self.root.after(300, self.conn.connect_now)
 
     # ------------------------------------------------------------- UI setup
 
@@ -188,6 +196,19 @@ class App:
         self.load_btn.pack(side="left")
         ttk.Button(top, text="Import CSV...",
                    command=self.load_csv).pack(side="left", padx=(6, 0))
+
+        # --- manual search row ---
+        manual = ttk.Frame(self.root)
+        manual.pack(fill="x", **pad)
+        ttk.Label(manual, text="Add a song:").pack(side="left")
+        self.manual_var = tk.StringVar()
+        manual_entry = ttk.Entry(manual, textvariable=self.manual_var)
+        manual_entry.pack(side="left", fill="x", expand=True, padx=6)
+        manual_entry.bind("<Return>", lambda e: self.add_manual_song())
+        ttk.Button(manual, text="Add to queue",
+                   command=self.add_manual_song).pack(side="left")
+        ttk.Button(manual, text="Search files...",
+                   command=self.open_search).pack(side="left", padx=(6, 0))
 
         # --- options row ---
         opts = ttk.Frame(self.root)
@@ -289,9 +310,40 @@ class App:
         self.chat_btn.pack(side="right", padx=(0, 6))
         self.dark_var = tk.BooleanVar(value=self.config["dark_mode"])
 
+    # ----------------------------------------------------- chat persistence
+
+    def _chat_history_path(self):
+        from .config import config_dir
+        return config_dir() / "chat_history.json"
+
+    def _load_chat_history(self):
+        import json
+        try:
+            with open(self._chat_history_path(), "r", encoding="utf-8") as f:
+                data = json.load(f)
+            self.pm_history = {k: [tuple(m) for m in v]
+                              for k, v in data.get("pm", {}).items()}
+            self.room_history = {k: [tuple(m) for m in v]
+                                for k, v in data.get("rooms", {}).items()}
+        except (OSError, ValueError):
+            pass
+
+    def _save_chat_history(self):
+        import json
+        # Keep the last 500 messages per conversation
+        def trim(hist):
+            return {k: v[-500:] for k, v in hist.items()}
+        try:
+            with open(self._chat_history_path(), "w", encoding="utf-8") as f:
+                json.dump({"pm": trim(self.pm_history),
+                           "rooms": trim(self.room_history)}, f)
+        except OSError:
+            pass
+
     # ------------------------------------------------------------- shutdown
 
     def _on_close(self):
+        self._save_chat_history()
         """Deterministic exit: background threads (connection loop, verify/
         tag executor threads, wedged library internals) must never keep the
         process alive after the window is gone."""
@@ -320,10 +372,14 @@ class App:
         SettingsDialog(self.root, self.config,
                        on_saved=self._on_settings_saved)
 
-    def _on_settings_saved(self):
+    def _on_settings_saved(self, port_changed=False):
         self.dark_var.set(bool(self.config["dark_mode"]))
         self._apply_theme()
         self.log("Settings saved.")
+        if port_changed:
+            self.log("Listening port changed - reconnecting...")
+            self.conn.submit(self.conn.reset())
+            self.root.after(300, self.conn.connect_now)
 
     def _apply_theme(self):
         dark = bool(self.dark_var.get())
@@ -422,6 +478,45 @@ class App:
         self.log(f"Soulseek settings saved - logging in as {username} "
                  f"({'your account' if is_custom else 'rotating identity'}).")
         self.conn.submit(self.conn.reset())
+
+    # --------------------------------------------------- manual search/queue
+
+    def add_manual_song(self):
+        text = self.manual_var.get().strip()
+        if not text:
+            return
+        # "Artist - Title" if a dash is present, else the whole thing as title
+        if " - " in text:
+            artist, title = text.split(" - ", 1)
+        else:
+            artist, title = "", text
+        self.enqueue_manual_track(Track(title=title.strip(),
+                                        artist=artist.strip()))
+        self.manual_var.set("")
+
+    def enqueue_manual_track(self, track: Track):
+        """Append a track to the list; if a run is active, add it live to
+        the running worker, otherwise it downloads with the next run."""
+        if self.playlist is None:
+            self.playlist = Playlist(name="Manual", tracks=[])
+            self.start_btn.configure(state="normal")
+        index = len(self.playlist.tracks)
+        self.playlist.tracks.append(track)
+        self.tree.insert("", "end", iid=str(index), values=(
+            index + 1, track.title, track.artist, "",
+            Status.PENDING.value, ""), tags=(Status.PENDING.name,))
+        self.progress.configure(maximum=max(len(self.playlist.tracks), 1))
+        self.tree.see(str(index))
+        if self.worker and self.worker_index_map is None:
+            # Live-append to the running full-playlist worker
+            self.worker.add_track(index, track)
+            self.log(f"Queued '{track}' onto the running download.")
+        else:
+            self.log(f"Added '{track}' to the queue.")
+
+    def open_search(self):
+        from .chat import SearchWindow
+        SearchWindow(self)
 
     # ----------------------------------------------------------------- chat
 
@@ -620,6 +715,9 @@ class App:
         menu.add_command(label=f"Copy \"{track.artist} - {track.title}\""[:60],
                          command=self._copy_title)
         menu.add_separator()
+        menu.add_command(label="Edit search text...",
+                         command=lambda: self._edit_search(index))
+        menu.add_separator()
         retry_label = ("Retry download" if status == Status.FAILED.value
                        else "Download again")
         menu.add_command(label=retry_label, command=self._retry_selected,
@@ -721,6 +819,24 @@ class App:
                 return
             local = self.worker_index_map[index]
         self.worker.skip_track(local)
+
+    def _edit_search(self, index: int):
+        from tkinter import simpledialog
+        track = self.playlist.tracks[index]
+        current = track.search_override or f"{track.artist} {track.title}".strip()
+        new = simpledialog.askstring(
+            "Edit search text",
+            "Text used to search Soulseek for this song\n"
+            "(the saved file keeps its original name and tags):",
+            initialvalue=current, parent=self.root)
+        if new is None:
+            return
+        track.search_override = new.strip()
+        note = f"search: {new.strip()}" if new.strip() else "search reset"
+        self.log(f"{track}: {note}")
+        # If it already failed, a fresh attempt is usually what's wanted
+        if self.worker is None and self._row_status(index) == Status.FAILED.value:
+            self._retry_selected()
 
     def _set_skip(self, index: int, skip: bool):
         track = self.playlist.tracks[index]
@@ -842,6 +958,7 @@ class App:
             stamp = _time.strftime("%H:%M")
             self.pm_history.setdefault(username, []).append(
                 (stamp, username, message))
+            self._save_chat_history()
             if self.chat_window and self.chat_window.winfo_exists():
                 self.chat_window.refresh_pms()
             else:
@@ -854,8 +971,19 @@ class App:
             stamp = _time.strftime("%H:%M")
             self.room_history.setdefault(room, []).append(
                 (stamp, username, message))
+            self._save_chat_history()
             if self.chat_window and self.chat_window.winfo_exists():
                 self.chat_window.refresh_rooms()
+        elif kind == "browse_result":
+            _, username, dirs, error = event
+            win = self.browse_windows.get(username)
+            if win and win.winfo_exists():
+                win.deliver(dirs, error)
+        elif kind == "search_result":
+            _, token, query, candidates, error = event
+            for win in list(self.search_windows.values()):
+                if win.winfo_exists():
+                    win.deliver(token, query, candidates, error)
         elif kind == "room_list":
             if self.chat_window and self.chat_window.winfo_exists():
                 self.chat_window.set_room_list(event[1])
@@ -978,6 +1106,27 @@ class SettingsDialog(tk.Toplevel):
             dls, text="Notification and sound when a run finishes",
             variable=self.notify_var).pack(anchor="w", padx=8, pady=(0, 8))
 
+        # --- connection ---
+        conn = ttk.LabelFrame(self, text="Connection")
+        conn.pack(fill="x", **pad)
+        prow = ttk.Frame(conn)
+        prow.pack(fill="x", padx=8, pady=(6, 2))
+        ttk.Label(prow, text="Listening port:").pack(side="left")
+        self.port_var = tk.StringVar(value=str(config["listening_port"]))
+        ttk.Entry(prow, textvariable=self.port_var,
+                  width=8).pack(side="left", padx=6)
+        ttk.Label(
+            conn, style="Subtle.TLabel", wraplength=430, justify="left",
+            text="Port for incoming peer connections (and the next one up). "
+                 "If your VPN forwards a port (e.g. PIA), enter it here. When "
+                 "busy, SpiritSeeker falls back to a nearby free port.",
+        ).pack(anchor="w", padx=8, pady=(0, 6))
+        self.startup_var = tk.BooleanVar(
+            value=bool(config["connect_on_startup"]))
+        ttk.Checkbutton(
+            conn, text="Connect and scan shared folders when the app opens",
+            variable=self.startup_var).pack(anchor="w", padx=8, pady=(0, 8))
+
         # --- buttons ---
         btns = ttk.Frame(self)
         btns.pack(fill="x", padx=10, pady=(0, 10))
@@ -1001,10 +1150,12 @@ class SettingsDialog(tk.Toplevel):
             attempts = clamped(self.attempts_var, 1, 10, "Sources to try")
             concurrent = clamped(self.concurrent_var, 1, 4,
                                  "Simultaneous downloads")
+            port = clamped(self.port_var, 1025, 65533, "Listening port")
         except ValueError as exc:
             messagebox.showerror(APP_NAME, str(exc), parent=self)
             return
         cfg = self.config_obj
+        port_changed = port != cfg["listening_port"]
         cfg["dark_mode"] = bool(self.dark_var.get())
         cfg["track_timeout_min"] = timeout
         cfg["stall_timeout_sec"] = stall
@@ -1013,9 +1164,11 @@ class SettingsDialog(tk.Toplevel):
         cfg["auto_retry_failed"] = bool(self.retry_var.get())
         cfg["notify_on_finish"] = bool(self.notify_var.get())
         cfg["overwrite_duplicates"] = bool(self.overwrite_var.get())
+        cfg["listening_port"] = port
+        cfg["connect_on_startup"] = bool(self.startup_var.get())
         cfg.save()
         self.destroy()
-        self.on_saved()
+        self.on_saved(port_changed=port_changed)
 
 
 class AccountDialog(tk.Toplevel):
@@ -1095,24 +1248,6 @@ class AccountDialog(tk.Toplevel):
         ttk.Button(share_btns, text="Remove selected",
                    command=self._remove_folder).pack(side="left", padx=(6, 0))
 
-        # --- connection section ---
-        conn = ttk.LabelFrame(self, text="Connection")
-        conn.pack(fill="x", **pad)
-        row = ttk.Frame(conn)
-        row.pack(fill="x", padx=8, pady=(6, 2))
-        ttk.Label(row, text="Listening port:").pack(side="left")
-        self.port_var = tk.StringVar(value=str(config["listening_port"]))
-        ttk.Entry(row, textvariable=self.port_var,
-                  width=8).pack(side="left", padx=6)
-        ttk.Label(
-            conn, style="Subtle.TLabel", wraplength=420, justify="left",
-            text="Uses this port (and the next one up) for incoming peer "
-                 "connections. If your VPN forwards a port (e.g. PIA's port "
-                 "forwarding), enter that port here for the best "
-                 "connectivity. When the port is busy, SpiritSeeker "
-                 "automatically falls back to a nearby free one.",
-        ).pack(anchor="w", padx=8, pady=(0, 8))
-
         # --- buttons ---
         btns = ttk.Frame(self)
         btns.pack(fill="x", padx=10, pady=(0, 10))
@@ -1145,17 +1280,7 @@ class AccountDialog(tk.Toplevel):
                 APP_NAME, "Enter your Soulseek username and password, or "
                 "switch back to the rotating identity.", parent=self)
             return
-        try:
-            port = int(self.port_var.get().strip())
-            if not 1024 < port < 65534:
-                raise ValueError
-        except ValueError:
-            messagebox.showerror(
-                APP_NAME, "Listening port must be a number between 1025 "
-                "and 65533.", parent=self)
-            return
         cfg = self.config_obj
-        cfg["listening_port"] = port
         cfg["use_custom_login"] = use_custom
         cfg["custom_username"] = username
         cfg["custom_password"] = password

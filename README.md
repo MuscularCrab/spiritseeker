@@ -71,6 +71,19 @@ with a live progress bar and transfer rate in the list, and failed tracks
 automatically get one more pass at the end of the run. When everything's
 done you get a Windows notification and a sound.
 
+## Manual search & queue
+
+You don't need a Spotify link. Type any **`Artist - Title`** (or just a
+title) into the *Add a song* box and it's appended to the download queue —
+even mid-run, in which case it joins the songs already downloading. Odd
+track name that won't match? Right-click it → **Edit search text...** to
+change exactly what gets searched on Soulseek, without changing the saved
+file's name or tags.
+
+**Search files...** opens a Nicotine+-style search window: type anything,
+see every matching file on the network ranked by quality, then download a
+result, add it to the main queue, or browse that user's whole library.
+
 ## Chat, rooms, and browsing (the Nicotine+ essentials)
 
 The **Chat...** button opens a full Soulseek chat client sharing the same
@@ -78,6 +91,7 @@ connection as your downloads:
 
 - **Private messages**: start conversations by username, receive messages
   (unread count shows on the Chat button while the window is closed).
+  Chat history is saved and restored between sessions.
 - **Chat rooms**: browse the public room list, join/leave rooms, and chat.
 - **Browse users**: fetch any user's entire shared-file tree and
   double-click files to download them straight to your save folder —
@@ -85,7 +99,8 @@ connection as your downloads:
   well-stocked sharer.
 
 The connection stays up in the background, so chat keeps working while
-playlists download and vice versa.
+playlists download and vice versa. SpiritSeeker connects and scans your
+shared folders automatically on startup (disable in Settings).
 
 ## Quality rules
 

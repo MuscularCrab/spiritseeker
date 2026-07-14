@@ -66,8 +66,18 @@ class ConnectionManager:
         async with self._lock:
             key = self._current_key()
             if self.session and self._session_key == key:
-                return self.session
-            if self.session:
+                # Reuse only if the underlying client is still logged in;
+                # the server can silently drop us (e.g. after a huge search)
+                if getattr(self.session.client, "session", None) is not None:
+                    return self.session
+                self.notify("log", "Soulseek connection dropped - "
+                            "reconnecting...")
+                try:
+                    await self.session.stop()
+                except Exception:
+                    pass
+                self.session = None
+            elif self.session:
                 self.notify("log", "Reconnecting to Soulseek "
                             "(settings changed)...")
                 await self.session.stop()
@@ -201,20 +211,34 @@ class ConnectionManager:
         """Just bring the connection up (used when the chat window opens)."""
         self._chat_call(lambda s: asyncio.sleep(0), "Connecting")
 
-    def browse_user(self, username: str, on_result: Callable):
-        """Fetch a user's shared files; call on_result(dirs | None, error)."""
+    def browse_user(self, username: str):
+        """Fetch a user's shared files. Results arrive as a
+        ("browse_result", username, dirs | None, error) GUI event —
+        never via direct widget calls, which are not thread-safe."""
         from aioslsk.commands import PeerGetSharesCommand
 
         async def run():
             try:
                 session = await self.ensure_session()
-                reply = await session.client(
+                # PeerGetSharesCommand returns (directories, locked_directories)
+                directories, locked = await session.client(
                     PeerGetSharesCommand(username), response=True, timeout=60)
-                dirs = list(reply.directories or [])
-                dirs += list(getattr(reply, "locked_directories", None) or [])
-                on_result(dirs, None)
+                dirs = list(directories or []) + list(locked or [])
+                self.notify("browse_result", username, dirs, None)
             except Exception as exc:  # noqa: BLE001
-                on_result(None, str(exc))
+                self.notify("browse_result", username, None, str(exc))
+        self.submit(run())
+
+    def search_files(self, query: str, token: int):
+        """Free-form file search. Results arrive as a
+        ("search_result", token, query, candidates, error) GUI event."""
+        async def run():
+            try:
+                session = await self.ensure_session()
+                results = await session.search(query)
+                self.notify("search_result", token, query, results, None)
+            except Exception as exc:  # noqa: BLE001
+                self.notify("search_result", token, query, [], str(exc))
         self.submit(run())
 
     def download_remote_file(self, username: str, remote_path: str,

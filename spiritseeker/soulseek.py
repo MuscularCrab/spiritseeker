@@ -122,6 +122,12 @@ def _strip_extras(title: str) -> str:
 
 def build_queries(track: Track) -> list[str]:
     """Search query variants, most specific first."""
+    # A user-supplied override wins outright (edited search text)
+    if track.search_override.strip():
+        return [track.search_override.strip()]
+    if not track.artist:
+        # Manual/search-window entries with just a title
+        return [track.title.strip()] if track.title.strip() else []
     primary_artist = re.split(r"[,;]| & | x | X ", track.artist)[0].strip()
     clean_title = _strip_extras(track.title)
     queries = [f"{primary_artist} {clean_title}"]
@@ -143,10 +149,18 @@ def build_queries(track: Track) -> list[str]:
 def rank_candidates(track: Track, candidates: list[Candidate],
                     require_320: bool) -> list[Candidate]:
     """Filter to plausible matches and sort best-first."""
-    title_tokens = _tokenize(_strip_extras(track.title))
-    artist_tokens = _tokenize(re.split(r"[,;]", track.artist)[0])
-    all_artist_tokens = _tokenize(track.artist)
-    wanted_tokens = _tokenize(track.title) | all_artist_tokens
+    if track.search_override.strip():
+        # Trust the user's edited query: require its words in the path,
+        # don't impose a separate artist requirement
+        title_tokens = _tokenize(track.search_override)
+        artist_tokens = set()
+        all_artist_tokens = set()
+        wanted_tokens = title_tokens
+    else:
+        title_tokens = _tokenize(_strip_extras(track.title))
+        artist_tokens = _tokenize(re.split(r"[,;]", track.artist)[0])
+        all_artist_tokens = _tokenize(track.artist)
+        wanted_tokens = _tokenize(track.title) | all_artist_tokens
 
     ranked = []
     for c in candidates:

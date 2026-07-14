@@ -106,6 +106,9 @@ class Worker:
         self._cooldowns_used = 0
         self._track_tasks: dict[int, asyncio.Task] = {}
         self._user_skipped: set[int] = set()
+        self._extra_tasks: list[asyncio.Task] = []
+        self._attempt = None            # set while a run is active
+        self._accepting = False
 
     def start(self):
         self._future = self.manager.submit(self._runner())
@@ -113,6 +116,18 @@ class Worker:
     def cancel(self):
         if self._future:
             self._future.cancel()
+
+    def add_track(self, index: int, track: Track):
+        """Append one more track to a RUNNING worker (thread-safe). The
+        track shares the same concurrency slots and counts in the totals."""
+        def do_add():
+            if not self._accepting or self._attempt is None:
+                return
+            task = asyncio.ensure_future(self._attempt(index, track))
+            self._track_tasks[index] = task
+            self._extra_tasks.append(task)
+        if self.manager.loop:
+            self.manager.loop.call_soon_threadsafe(do_add)
 
     def skip_track(self, index: int):
         """Cancel one in-flight track (thread-safe); it's marked skipped
@@ -182,6 +197,8 @@ class Worker:
                 for i in indices}
             return self._track_tasks
 
+        self._attempt = attempt
+        self._accepting = True
         try:
             results = await asyncio.gather(
                 *spawn_all(range(len(self.playlist.tracks))).values())
@@ -197,7 +214,16 @@ class Worker:
                 failed_idx = [i for i, r in zip(failed_idx, retried)
                               if r is False]
             fail = len(failed_idx)
+
+            # Tracks appended mid-run via add_track (manual searches)
+            while self._extra_tasks:
+                batch, self._extra_tasks = self._extra_tasks, []
+                extras = await asyncio.gather(*batch)
+                ok += sum(1 for r in extras if r is True)
+                fail += sum(1 for r in extras if r is False)
         finally:
+            self._accepting = False
+            self._attempt = None
             # The session stays connected for chat and the next run
             shutil.rmtree(tmp_dir, ignore_errors=True)
 

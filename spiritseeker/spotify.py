@@ -31,13 +31,16 @@ class Track:
     artist: str
     duration_ms: int = 0
     album: str = ""
+    # When set, this string is used for the Soulseek search instead of
+    # "artist title" - lets the user fix odd names without losing the tags
+    search_override: str = ""
 
     @property
     def duration_sec(self) -> float:
         return self.duration_ms / 1000.0
 
     def __str__(self):
-        return f"{self.artist} - {self.title}"
+        return f"{self.artist} - {self.title}" if self.artist else self.title
 
 
 @dataclass
